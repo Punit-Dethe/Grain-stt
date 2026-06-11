@@ -211,14 +211,6 @@ function drawField() {
     if (p.x > fw + 20) seedParticle(p, false)
   }
 
-  // center seam — a thin scanning gate where signal crosses into text
-  const gateX = third * 1.86
-  const gl = fc.createLinearGradient(gateX - 30, 0, gateX + 30, 0)
-  gl.addColorStop(0, 'rgba(255,93,30,0)')
-  gl.addColorStop(0.5, `rgba(255,93,30,${0.05 + fEnergy * 0.1})`)
-  gl.addColorStop(1, 'rgba(255,93,30,0)')
-  fc.fillStyle = gl
-  fc.fillRect(gateX - 30, 0, 60, fh)
 
   requestAnimationFrame(drawField)
 }
