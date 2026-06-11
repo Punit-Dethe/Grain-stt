@@ -1,0 +1,12 @@
+# Main app runtime dependencies
+PySide6>=6.11.0
+sounddevice>=0.4.6
+keyboard>=0.13.5
+httpx>=0.27.0
+keyring>=25.2.1
+platformdirs>=4.2.2
+numpy>=1.24.0
+
+# Build tooling (not included in the EXE)
+pyinstaller>=6.10.0
+pyinstaller-hooks-contrib>=2024.9

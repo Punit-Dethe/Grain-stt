@@ -1,0 +1,475 @@
+"""Entry point for Open Voice Router.
+
+Responsibilities:
+- Create QApplication
+- Load persisted settings before any other initialization (Requirement 11.2)
+- Instantiate all services, Router, AppController, view models, and QML engine
+- Register PillViewModel and SettingsViewModel as QML context properties
+- Set up the system tray icon and context menu (Requirements 1.1, 1.2)
+- Show tray notification on corrupt config (Requirement 11.3)
+- Start the Qt event loop
+- No foreground window is opened on startup (Requirement 1.3)
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import os
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QFontDatabase, QWindow
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+
+from open_voice_router.app_controller import AppController
+from open_voice_router.logger import Logger
+from open_voice_router.models import AppSettings, ProviderConfig
+from open_voice_router.router import Router
+from open_voice_router.services.audio import AudioService
+from open_voice_router.services.clipboard import ClipboardService
+from open_voice_router.services.hotkey import HotkeyService
+from open_voice_router.services.llm_client import LLMClient
+from open_voice_router.services.local_stt_manager import LocalSTTManager
+from open_voice_router.services.stt_client import STTClient
+from open_voice_router.storage.credential_store import CredentialStore
+from open_voice_router.storage.settings_store import SettingsStore
+from open_voice_router.ui.pill.pill_viewmodel import PillViewModel
+from open_voice_router.ui.settings.settings_viewmodel import SettingsViewModel
+
+# Path to the QML UI files.
+# In a PyInstaller frozen build the entry-point script's __file__ does not
+# reliably resolve to its in-package location, so we detect the frozen case
+# explicitly and anchor from sys._MEIPASS (the extraction root).
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    _PKG_DIR = Path(sys._MEIPASS) / "open_voice_router"
+else:
+    _PKG_DIR = Path(__file__).parent
+_UI_DIR = _PKG_DIR / "ui"
+_FONTS_DIR = _PKG_DIR / "assets" / "fonts"
+_PILL_QML = _UI_DIR / "pill" / "PillWindow.qml"
+_CONSOLE_QML = _UI_DIR / "console" / "ConsoleWindow.qml"
+
+
+def _load_bundled_fonts() -> None:
+    """Register bundled TTF files with Qt before any QML loads.
+
+    Syne and JetBrains Mono are not guaranteed to be installed on the host
+    system; loading them from the bundle ensures every QML font.family
+    reference resolves to the correct typeface.
+    """
+    for ttf in _FONTS_DIR.glob("*.ttf"):
+        QFontDatabase.addApplicationFont(str(ttf))
+
+
+def _write_qml_error(msg: str) -> None:
+    """Write a QML load error to a file so it is visible without a console."""
+    try:
+        import platformdirs
+        log_dir = Path(platformdirs.user_log_dir("GrainSTT", "GrainSTT"))
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / "qml_error.log", "a", encoding="utf-8") as f:
+            from datetime import datetime
+            f.write(f"{datetime.now().isoformat()} {msg}")
+    except Exception:
+        pass
+
+
+def _open_log_path(log_file_path: str) -> None:
+    """Open the log file's containing folder in the OS file manager."""
+    import subprocess  # lazy — only needed when user clicks "View Log"
+
+    if not log_file_path:
+        return
+    folder = os.path.dirname(log_file_path)
+    if not os.path.exists(folder):
+        return
+    if sys.platform == "win32":
+        if os.path.exists(log_file_path):
+            subprocess.Popen(["explorer", "/select,", log_file_path])
+        else:
+            subprocess.Popen(["explorer", folder])
+    elif sys.platform == "darwin":
+        subprocess.Popen(
+            ["open", "-R", log_file_path]
+            if os.path.exists(log_file_path)
+            else ["open", folder]
+        )
+    else:
+        subprocess.Popen(["xdg-open", folder])
+
+
+def _ensure_local_provider_registered(
+    settings: AppSettings,
+    settings_store: SettingsStore,
+    manager: LocalSTTManager,
+) -> AppSettings:
+    """Register the bundled local STT provider at startup if it is installed.
+
+    This is a backend concern, intentionally decoupled from the settings
+    window: previously the provider was only registered when the UI opened,
+    so the hotkey did nothing in tray mode. Here we prepend the local provider
+    (making it the active STT engine) and persist it, so a fresh launch with
+    the UI never opened still drives on-demand load/unload via the hotkey.
+
+    Idempotent: if the provider is already present, returns settings unchanged.
+    """
+    pid = LocalSTTManager.PROVIDER_ID
+    if any(p.id == pid for p in settings.stt_providers):
+        return settings
+    provider = ProviderConfig(
+        id=pid,
+        name="Local (Parakeet)",
+        base_url=LocalSTTManager.SERVER_URL,
+        model=LocalSTTManager.MODEL_NAME,
+        quota_limit=None,
+        quota_used_today=0,
+    )
+    updated = dataclasses.replace(
+        settings, stt_providers=[provider] + list(settings.stt_providers)
+    )
+    settings_store.save(updated)
+    return updated
+
+
+def main() -> None:
+    """Application entry point."""
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+    app.setApplicationName("Open Voice Router")
+    app.setOrganizationName("OpenVoiceRouter")
+
+    _load_bundled_fonts()
+
+    # ------------------------------------------------------------------
+    # 1. Load settings FIRST (Requirement 11.2)
+    # ------------------------------------------------------------------
+    settings_store = SettingsStore()
+    _config_was_corrupt = False
+
+    try:
+        settings = settings_store.load()
+        # Detect corrupt/missing by comparing to defaults (load() never raises)
+        # We detect it by checking if the file exists but returned defaults
+        config_path = settings_store._path
+        if config_path.exists():
+            import json
+
+            try:
+                json.loads(config_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, Exception):
+                _config_was_corrupt = True
+                settings = AppSettings.defaults()
+    except Exception:
+        _config_was_corrupt = True
+        settings = AppSettings.defaults()
+
+    # ------------------------------------------------------------------
+    # 2. Instantiate infrastructure
+    # ------------------------------------------------------------------
+    credential_store = CredentialStore()
+
+    # Ensure log directory exists
+    log_dir = os.path.dirname(settings.log_file_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    logger = Logger(settings.log_file_path)
+
+    # ------------------------------------------------------------------
+    # 3. Instantiate services
+    # ------------------------------------------------------------------
+    audio_service = AudioService()
+    hotkey_service = HotkeyService()
+    stt_client = STTClient()
+    llm_client = LLMClient()
+    clipboard_service = ClipboardService()
+
+    # ------------------------------------------------------------------
+    # Local STT manager — created here in the backend so its lifecycle is
+    # fully decoupled from the QML front-end (it must work in tray mode with
+    # the UI closed). Shared by the settings UI and the session controller so
+    # both drive the same process (single-process invariant — R8.5).
+    # ------------------------------------------------------------------
+    local_stt_manager = LocalSTTManager()
+
+    # Register the local provider at startup if installed, so the hotkey works
+    # with the UI never opened (registration is no longer gated on the settings
+    # window). Makes the local engine the active STT provider and persists it.
+    # Done before Router/AppController so every consumer sees the same settings.
+    if local_stt_manager.is_installed():
+        settings = _ensure_local_provider_registered(
+            settings, settings_store, local_stt_manager
+        )
+
+    # ------------------------------------------------------------------
+    # 4. Instantiate Router
+    # ------------------------------------------------------------------
+    router = Router(settings, settings_store)
+
+    # ------------------------------------------------------------------
+    # 5. Instantiate view models
+    # ------------------------------------------------------------------
+    pill_vm = PillViewModel()
+
+    settings_vm = SettingsViewModel(
+        settings_store=settings_store,
+        credential_store=credential_store,
+        local_stt_manager=local_stt_manager,
+    )
+
+    # ------------------------------------------------------------------
+    # 6. Instantiate AppController
+    # ------------------------------------------------------------------
+    controller = AppController(
+        settings=settings,
+        settings_store=settings_store,
+        credential_store=credential_store,
+        audio_service=audio_service,
+        hotkey_service=hotkey_service,
+        stt_client=stt_client,
+        llm_client=llm_client,
+        clipboard_service=clipboard_service,
+        router=router,
+        logger=logger,
+        pill_viewmodel=pill_vm,
+        local_stt_manager=local_stt_manager,
+    )
+
+    # ------------------------------------------------------------------
+    # 7. Set up QML engine and register context properties
+    # ------------------------------------------------------------------
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("pillViewModel", pill_vm)
+    engine.rootContext().setContextProperty("settingsViewModel", settings_vm)
+
+    # Load the Pill UI
+    engine.load(QUrl.fromLocalFile(str(_PILL_QML)))
+    if not engine.rootObjects():
+        _qml_err = f"[ERROR] Failed to load Pill QML from {_PILL_QML}\n"
+        print(_qml_err, file=sys.stderr)
+        _write_qml_error(_qml_err)
+
+    # The console window gets its own isolated engine created on demand.
+    # All QML types it loads (ModuleA/B/C, panels, etc.) live inside that
+    # engine and are fully freed when the engine is destroyed on close.
+    _console_engine: QQmlApplicationEngine | None = None
+    _console_window: QWindow | None = None
+
+    def _trim_working_set() -> None:
+        """Release pages freed by Qt's heap back to the OS working set.
+
+        After the Qt engine is deleted, the C runtime heap holds the freed
+        pages internally. EmptyWorkingSet forces Windows to page them out,
+        so the process footprint returns to baseline in monitoring tools.
+        Only called on Windows; no-op on other platforms.
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            psapi.EmptyWorkingSet(kernel32.GetCurrentProcess())
+        except Exception:
+            pass
+
+    def _dispose_settings_window() -> None:
+        """Tear down the console engine and free all its QML types."""
+        nonlocal _console_engine, _console_window
+
+        _console_window = None  # drop window ref first; engine owns the C++ object
+
+        if _console_engine is not None:
+            doomed = _console_engine
+            _console_engine = None  # release Python reference immediately
+            try:
+                doomed.clearComponentCache()
+            except Exception:
+                pass
+            try:
+                doomed.deleteLater()  # schedule C++ destruction via event loop
+            except Exception:
+                pass
+            # Chain a second zero-delay timer so _trim fires in the tick AFTER
+            # the DeferredDelete event has been processed (not the same tick).
+            QTimer.singleShot(0, lambda: QTimer.singleShot(0, _trim_working_set))
+
+    def _open_settings() -> None:
+        nonlocal _console_engine, _console_window
+
+        if _console_engine is None:
+            _console_engine = QQmlApplicationEngine()
+            _console_engine.rootContext().setContextProperty(
+                "consoleViewModel", settings_vm
+            )
+            _console_engine.load(QUrl.fromLocalFile(str(_CONSOLE_QML)))
+            if not _console_engine.rootObjects():
+                _qml_err = f"[ERROR] Failed to load Console QML from {_CONSOLE_QML}\n"
+                print(_qml_err, file=sys.stderr)
+                _write_qml_error(_qml_err)
+                _console_engine = None
+                return
+
+            from typing import cast as _cast
+
+            _console_window = _cast(QWindow, _console_engine.rootObjects()[0])
+
+            def _on_visibility_changed() -> None:
+                if _console_window is not None and not _console_window.isVisible():
+                    if not settings_vm._settings.close_to_tray:
+                        # "Close to System Tray" is OFF — closing means quit.
+                        app.quit()
+                    else:
+                        QTimer.singleShot(0, _dispose_settings_window)
+
+            _console_window.visibleChanged.connect(_on_visibility_changed)
+
+        settings_vm.load()
+        if _console_window is not None:
+            _console_window.show()
+            _console_window.raise_()
+            _console_window.requestActivate()
+
+    # ------------------------------------------------------------------
+    # 8. System tray icon and context menu (Requirements 1.1, 1.2)
+    # ------------------------------------------------------------------
+    icon = app.style().standardIcon(app.style().StandardPixmap.SP_ComputerIcon)
+    tray = QSystemTrayIcon(icon, parent=app)
+    tray.setToolTip("Open Voice Router")
+
+    menu = QMenu()
+
+    open_settings_action = menu.addAction("Settings…")
+    open_settings_action.triggered.connect(_open_settings)
+
+    view_log_action = menu.addAction("View Log")
+    # Capture the log path once — it doesn't change at runtime.
+    _log_file_path = settings.log_file_path
+    view_log_action.triggered.connect(lambda: _open_log_path(_log_file_path))
+
+    menu.addSeparator()
+
+    copy_transcribed_action = menu.addAction("Copy last transcribed")
+    copy_processed_action   = menu.addAction("Copy last processed")
+
+    def _copy_to_clipboard(text: str, label: str) -> None:
+        if text:
+            app.clipboard().setText(text)
+            preview = text[:60] + ("…" if len(text) > 60 else "")
+            tray.showMessage(f"Copied {label}", preview, QSystemTrayIcon.MessageIcon.Information, 2000)
+
+    copy_transcribed_action.triggered.connect(
+        lambda: _copy_to_clipboard(controller.get_last_transcribed(), "transcription")
+    )
+    copy_processed_action.triggered.connect(
+        lambda: _copy_to_clipboard(controller.get_last_processed(), "processed text")
+    )
+
+    menu.addSeparator()
+
+    quit_action = menu.addAction("Quit")
+    quit_action.triggered.connect(app.quit)
+
+    tray.setContextMenu(menu)
+    tray.show()
+
+    # Wire AppController tray notification signal
+    controller.show_notification.connect(
+        lambda title, msg: tray.showMessage(title, msg)
+    )
+    # Wire open settings request (e.g. hotkey conflict)
+    controller.open_settings_requested.connect(_open_settings)
+
+    # Wire SettingsViewModel settings_changed → AppController.update_settings.
+    # settings_vm._settings is already the freshly saved AppSettings object —
+    # no need to hit the disk again with settings_store.load().
+    settings_vm.settings_changed.connect(
+        lambda: controller.update_settings(settings_vm._settings)
+    )
+
+    # Wire history signals → SettingsViewModel so UI + tray stay in sync
+    controller.transcription_result_ready.connect(settings_vm.add_transcription_entry)
+    controller.processing_result_ready.connect(settings_vm.add_processing_entry)
+    controller.llm_error_occurred.connect(settings_vm.set_llm_error_message)
+    # Clear the error banner when processing succeeds
+    controller.processing_result_ready.connect(lambda _t, _ts: settings_vm.set_llm_error_message(""))
+
+    # ------------------------------------------------------------------
+    # 9. Wire AppController to tray icon for notifications
+    # ------------------------------------------------------------------
+    controller._tray_icon = tray
+
+    # ------------------------------------------------------------------
+    # 10. Setup (registers both hotkeys, wires signals, schedules midnight reset)
+    # ------------------------------------------------------------------
+    controller.setup()
+
+    # ------------------------------------------------------------------
+    # 11. Local STT lifecycle wiring (no preload — Requirements 1.1, 1.2)
+    # ------------------------------------------------------------------
+    # The model is loaded on demand per session by AppController, not at
+    # launch. We share the single SettingsViewModel-owned manager instance so
+    # the settings UI and the session controller drive the same process
+    # (single-process invariant — Requirement 8.5).
+    local_mgr = local_stt_manager
+
+    # Surface local STT crashes/startup failures to the user via the tray —
+    # otherwise a dead server just makes every transcription silently fail.
+    local_mgr.server_crashed.connect(
+        lambda reason: tray.showMessage(
+            "Local STT stopped",
+            "The local speech-to-text server is not running. "
+            "Open Settings → Local STT to restart it.\n" + (reason or ""),
+        )
+    )
+
+    # Stop local STT cleanly when app quits
+    app.aboutToQuit.connect(local_mgr.stop)
+
+    # ------------------------------------------------------------------
+    # 11. Show tray notification if config was corrupt (Requirement 11.3)
+    # ------------------------------------------------------------------
+    if _config_was_corrupt:
+        tray.showMessage(
+            "Configuration reset",
+            "The settings file was missing or corrupt. Starting with default settings.",
+        )
+
+    # ------------------------------------------------------------------
+    # 12. Protect the main process's working set from OS trimming.
+    #
+    # When the ASR server subprocess maps 640 MB of model weights, Windows
+    # Memory Manager may satisfy that demand by trimming OTHER processes'
+    # working sets — including ours — which causes the pill animation to
+    # freeze for 100-400 ms.  Setting a hard minimum working set size tells
+    # the OS it cannot trim us below that threshold, so our QML engine,
+    # FrameAnimation callbacks, and dot-state arrays stay resident in RAM.
+    #
+    # 80 MB covers the Python runtime + Qt/QML engine + pill window pages
+    # with margin. BELOW_NORMAL_PRIORITY_CLASS on the subprocess (set in
+    # LocalSTTManager._spawn_and_poll) is the complementary fix on that side.
+    # ------------------------------------------------------------------
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            _QUOTA_LIMITS_HARDWS_MIN_ENABLE = 0x00000001
+            _QUOTA_LIMITS_HARDWS_MAX_DISABLE = 0x00000008
+            ctypes.windll.kernel32.SetProcessWorkingSetSizeEx(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                80 * 1024 * 1024,  # hard minimum: 80 MB always resident
+                0,                  # maximum: not enforced
+                _QUOTA_LIMITS_HARDWS_MIN_ENABLE | _QUOTA_LIMITS_HARDWS_MAX_DISABLE,
+            )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 13. Run the event loop
+    # ------------------------------------------------------------------
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
