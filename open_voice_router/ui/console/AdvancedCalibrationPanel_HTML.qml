@@ -752,6 +752,24 @@ Item {
                         }
 
                         SettingRow {
+                            label: "Launch Minimized"
+                            hint: "Start silently in tray — turn off to open console on launch"
+                            MechanicalToggle {
+                                id: startMinimizedToggle
+                                checked: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                         ? consoleViewModel.start_minimized : true
+                                Connections {
+                                    target: (typeof consoleViewModel !== "undefined") ? consoleViewModel : null
+                                    function onStart_minimized_changed(val) { startMinimizedToggle.checked = val }
+                                }
+                                onToggled: {
+                                    if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        consoleViewModel.save_start_minimized(checked)
+                                }
+                            }
+                        }
+
+                        SettingRow {
                             label: "Play Sound"
                             hint: "Play confirmation sounds on keybind triggers"
                             MechanicalToggle {
