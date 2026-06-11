@@ -73,3 +73,4 @@ Plan
 .mcp.json
 .github/code-review-graph.instruction.md
 python injects/
+installer/
