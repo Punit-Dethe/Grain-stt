@@ -94,6 +94,7 @@ class AppSettings:
     prompts: list[PromptConfig] = field(default_factory=list)
     word_dictionary: list[str] = field(default_factory=lambda: list(DEFAULT_WORD_DICTIONARY))
     launch_on_boot: bool = False
+    start_minimized: bool = True   # True = start silently in tray; False = open console on launch
     play_sound: bool = True
     process_audio: bool = True
     # Model_Load timeout in seconds; valid range [10, 120], default 30 (R7.2).

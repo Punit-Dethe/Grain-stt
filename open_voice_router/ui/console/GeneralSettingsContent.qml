@@ -51,83 +51,119 @@ Item {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 16
-                    
+
                     ColumnLayout {
                         spacing: 2
                         Layout.fillWidth: true
-                        
+
                         Text {
                             text: "Launch on Boot"
                             font.pixelSize: 13
                             font.bold: true
                             color: textDark
                         }
-                        
+
                         Text {
                             text: "Start daemon automatically on system startup"
                             font.pixelSize: 10
                             color: Qt.rgba(0.078, 0.075, 0.071, 0.6)
                         }
                     }
-                    
+
                     MechanicalToggle {
-                        checked: true
+                        id: launchOnBootToggle
+                        checked: typeof consoleViewModel !== "undefined" && consoleViewModel
+                                 ? consoleViewModel.launch_on_boot : false
+
+                        Connections {
+                            target: (typeof consoleViewModel !== "undefined") ? consoleViewModel : null
+                            function onLaunch_on_boot_changed(val) { launchOnBootToggle.checked = val }
+                        }
+
+                        onToggled: {
+                            if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                consoleViewModel.save_launch_on_boot(checked)
+                        }
                     }
                 }
-                
+
                 // Toggle 2: Launch Minimized
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 16
-                    
+
                     ColumnLayout {
                         spacing: 2
                         Layout.fillWidth: true
-                        
+
                         Text {
                             text: "Launch Minimized"
                             font.pixelSize: 13
                             font.bold: true
                             color: textDark
                         }
-                        
+
                         Text {
                             text: "Hide main window and run in system tray"
                             font.pixelSize: 10
                             color: Qt.rgba(0.078, 0.075, 0.071, 0.6)
                         }
                     }
-                    
+
                     MechanicalToggle {
-                        checked: false
+                        id: startMinimizedToggle
+                        checked: typeof consoleViewModel !== "undefined" && consoleViewModel
+                                 ? consoleViewModel.start_minimized : true
+
+                        Connections {
+                            target: (typeof consoleViewModel !== "undefined") ? consoleViewModel : null
+                            function onStart_minimized_changed(val) { startMinimizedToggle.checked = val }
+                        }
+
+                        onToggled: {
+                            if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                consoleViewModel.save_start_minimized(checked)
+                        }
                     }
                 }
-                
+
                 // Toggle 3: Play UI Sounds
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 16
-                    
+
                     ColumnLayout {
                         spacing: 2
                         Layout.fillWidth: true
-                        
+
                         Text {
                             text: "Interface Sounds"
                             font.pixelSize: 13
                             font.bold: true
                             color: textDark
                         }
-                        
+
                         Text {
                             text: "Play audio cues for transcription states"
                             font.pixelSize: 10
                             color: Qt.rgba(0.078, 0.075, 0.071, 0.6)
                         }
                     }
-                    
+
                     MechanicalToggle {
-                        checked: true
+                        id: playSoundToggle
+                        checked: typeof consoleViewModel !== "undefined" && consoleViewModel
+                                 ? consoleViewModel.play_sound : true
+
+                        Connections {
+                            target: (typeof consoleViewModel !== "undefined") ? consoleViewModel : null
+                            function onPlay_sound_changed(val) { playSoundToggle.checked = val }
+                        }
+
+                        onToggled: {
+                            if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                consoleViewModel.save_play_sound(checked)
+                        }
                     }
                 }
                 

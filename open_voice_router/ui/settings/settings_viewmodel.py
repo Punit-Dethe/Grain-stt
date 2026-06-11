@@ -92,6 +92,7 @@ class SettingsViewModel(QObject):
     microphone_combo_index_changed = Signal(int)
     close_to_tray_changed = Signal(bool)
     launch_on_boot_changed = Signal(bool)
+    start_minimized_changed = Signal(bool)
     play_sound_changed = Signal(bool)
     process_audio_changed = Signal(bool)
     stt_providers_changed = Signal()
@@ -143,6 +144,7 @@ class SettingsViewModel(QObject):
         self._microphone_combo_index: int = 0
         self._close_to_tray: bool = self._settings.close_to_tray
         self._launch_on_boot: bool = self._settings.launch_on_boot
+        self._start_minimized: bool = self._settings.start_minimized
         self._play_sound: bool = self._settings.play_sound
         self._process_audio: bool = self._settings.process_audio
         self._stt_providers: list[dict[str, Any]] = []
@@ -188,6 +190,7 @@ class SettingsViewModel(QObject):
         self._load_microphone_devices()
         self._set_close_to_tray(self._settings.close_to_tray)
         self._set_launch_on_boot(self._settings.launch_on_boot)
+        self._set_start_minimized(self._settings.start_minimized)
         self._set_play_sound(self._settings.play_sound)
         self._set_process_audio(self._settings.process_audio)
         self._set_stt_providers(
@@ -256,6 +259,7 @@ class SettingsViewModel(QObject):
             prompts=overrides.get("prompts", self._settings.prompts),
             word_dictionary=overrides.get("word_dictionary", self._settings.word_dictionary),
             launch_on_boot=overrides.get("launch_on_boot", self._settings.launch_on_boot),
+            start_minimized=overrides.get("start_minimized", self._settings.start_minimized),
             play_sound=overrides.get("play_sound", self._settings.play_sound),
             process_audio=overrides.get("process_audio", self._settings.process_audio),
             local_stt_load_timeout_s=overrides.get(
@@ -453,9 +457,31 @@ class SettingsViewModel(QObject):
 
     @Slot(bool)
     def save_launch_on_boot(self, enabled: bool) -> None:
+        from open_voice_router.startup_registry import apply_launch_on_boot
+        apply_launch_on_boot(enabled)
         self._settings = self._updated_settings(launch_on_boot=enabled)
         self._settings_store.save(self._settings)
         self._set_launch_on_boot(enabled)
+        self.settings_changed.emit()
+
+    # ------------------------------------------------------------------
+    # start_minimized  (True = stay in tray; False = open console on launch)
+    # ------------------------------------------------------------------
+
+    @Property(bool, notify=start_minimized_changed)
+    def start_minimized(self) -> bool:
+        return self._start_minimized
+
+    def _set_start_minimized(self, value: bool) -> None:
+        if self._start_minimized != value:
+            self._start_minimized = value
+            self.start_minimized_changed.emit(value)
+
+    @Slot(bool)
+    def save_start_minimized(self, enabled: bool) -> None:
+        self._settings = self._updated_settings(start_minimized=enabled)
+        self._settings_store.save(self._settings)
+        self._set_start_minimized(enabled)
         self.settings_changed.emit()
 
     # ------------------------------------------------------------------

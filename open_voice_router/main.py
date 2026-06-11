@@ -406,6 +406,11 @@ def main() -> None:
     # ------------------------------------------------------------------
     controller.setup()
 
+    # Sync the startup registry entry with the persisted setting so the app
+    # stays consistent even after reinstalls or profile migrations.
+    from open_voice_router.startup_registry import apply_launch_on_boot
+    apply_launch_on_boot(settings.launch_on_boot)
+
     # ------------------------------------------------------------------
     # 11. Local STT lifecycle wiring (no preload — Requirements 1.1, 1.2)
     # ------------------------------------------------------------------
@@ -429,7 +434,16 @@ def main() -> None:
     app.aboutToQuit.connect(local_mgr.stop)
 
     # ------------------------------------------------------------------
-    # 11. Show tray notification if config was corrupt (Requirement 11.3)
+    # 11. Open console on startup when the user has disabled "Launch Minimized"
+    # ------------------------------------------------------------------
+    if not settings.start_minimized:
+        # Defer slightly so the tray icon is fully initialised before the
+        # console window appears (avoids a brief flash of the window before
+        # the tray icon is ready on slower machines).
+        QTimer.singleShot(300, _open_settings)
+
+    # ------------------------------------------------------------------
+    # 12. Show tray notification if config was corrupt (Requirement 11.3)
     # ------------------------------------------------------------------
     if _config_was_corrupt:
         tray.showMessage(
@@ -438,7 +452,7 @@ def main() -> None:
         )
 
     # ------------------------------------------------------------------
-    # 12. Protect the main process's working set from OS trimming.
+    # 13. Protect the main process's working set from OS trimming.
     #
     # When the ASR server subprocess maps 640 MB of model weights, Windows
     # Memory Manager may satisfy that demand by trimming OTHER processes'
@@ -466,7 +480,7 @@ def main() -> None:
             pass
 
     # ------------------------------------------------------------------
-    # 13. Run the event loop
+    # 14. Run the event loop
     # ------------------------------------------------------------------
     sys.exit(app.exec())
 

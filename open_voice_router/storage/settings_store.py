@@ -159,6 +159,7 @@ def _app_settings_from_dict(d: dict[str, Any]) -> AppSettings:
         prompts=_migrate_prompts(prompts),
         word_dictionary=_migrate_word_dictionary(raw_words),
         launch_on_boot=bool(d.get("launch_on_boot", False)),
+        start_minimized=bool(d.get("start_minimized", True)),
         play_sound=bool(d.get("play_sound", True)),
         process_audio=bool(d.get("process_audio", True)),
         local_stt_load_timeout_s=_validate_load_timeout(
