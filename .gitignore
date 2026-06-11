@@ -1,0 +1,75 @@
+﻿# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# ── PyInstaller ──────────────────────────────────────────────────────────────
+build/
+dist/
+*.manifest
+
+# ── Environment & secrets ────────────────────────────────────────────────────
+.env
+.env.*
+*.env
+secrets.json
+credentials.json
+
+# ── User settings (stored in %APPDATA% — excluded here as a safeguard) ───────
+settings.json
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.DS_Store
+$RECYCLE.BIN/
+
+# ── IDE & tools ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.kiro/
+.cursor/
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+QODER.md
+Agent.md
+
+# ── Logs & temp ──────────────────────────────────────────────────────────────
+*.log
+logs/
+temp_uploads/
+*.tmp
+
+# ── Node (website deps if ever installed) ────────────────────────────────────
+node_modules/
+.next/
+.vercel/
+
+# ── Misc artefacts ───────────────────────────────────────────────────────────
+insp/
+Plan
+
+# ── AI / IDE tool configs (not for public repo) ───────────────────────────────
+.claude/
+.gemini/
+.kiro/
+.cursor/
+.qoder/
+.windsurfrules
+.cursorrules
+.opencode.json
+.mcp.json
+.github/code-review-graph.instruction.md
+python injects/

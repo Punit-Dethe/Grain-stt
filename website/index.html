@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grain — The Open Voice Layer</title>
+  <meta name="description" content="An open-source voice layer for your desktop. Speak to dictate or speak to your AI — with pluggable, OpenAI-compatible transcription and processing.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ═══ NAV ═══════════════════════════════════════════════════════════════ -->
+  <nav id="nav">
+    <div class="nav-inner">
+      <a href="#top" class="nav-logo">GRAIN<span class="nav-logo-dot"></span></a>
+      <div class="nav-links">
+        <a href="#architecture">Architecture</a>
+        <a href="#widget">Widget</a>
+        <a href="#routing">Routing</a>
+        <a href="#open">Open Source</a>
+        <a href="#download" class="nav-cta">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ═══ HERO ══════════════════════════════════════════════════════════════ -->
+  <header id="top" class="hero">
+    <canvas id="grid"></canvas>
+    <div class="hero-grain"></div>
+    <div class="hero-inner">
+      <div class="hero-eyebrow">
+        <span class="dot"></span>
+        <span class="mono">OPEN-SOURCE VOICE LAYER</span>
+      </div>
+      <h1 class="hero-title">
+        <span class="line">Your voice,</span>
+        <span class="line"><em>everywhere</em></span>
+        <span class="line">you type.</span>
+      </h1>
+      <p class="hero-sub">
+        Grain turns speech into clean text anywhere on your desktop — or sends it
+        straight to your AI. Pluggable transcription, pluggable processing, both
+        OpenAI-compatible. You keep control of every backend.
+      </p>
+      <div class="hero-actions">
+        <a href="#download" class="btn btn-solid" data-cursor>Download for Windows</a>
+        <a href="https://github.com" class="btn btn-line" data-cursor>
+          <span>View source</span>
+          <span class="btn-arrow">&rarr;</span>
+        </a>
+      </div>
+    </div>
+    <div class="hero-foot mono">
+      <span>EST. 2026</span>
+      <span class="hero-foot-mid">// OPEN VOICE ROUTER</span>
+      <span class="hero-scroll">SCROLL <span class="hero-scroll-line"></span></span>
+    </div>
+  </header>
+
+  <!-- ═══ MARQUEE ═══════════════════════════════════════════════════════════ -->
+  <div class="marquee" aria-hidden="true">
+    <div class="marquee-row">
+      <span class="m-label mono">OPENAI-COMPATIBLE</span>
+      <span class="m-item">Deepgram</span><span class="m-sep">·</span>
+      <span class="m-item">AssemblyAI</span><span class="m-sep">·</span>
+      <span class="m-item">Groq</span><span class="m-sep">·</span>
+      <span class="m-item">Gemini</span><span class="m-sep">·</span>
+      <span class="m-item">Cerebras</span><span class="m-sep">·</span>
+      <span class="m-item">OpenAI</span><span class="m-sep">·</span>
+      <span class="m-item">Local Parakeet</span><span class="m-sep">·</span>
+      <span class="m-item">Self-hosted</span><span class="m-sep">·</span>
+      <span class="m-label mono">OPENAI-COMPATIBLE</span>
+      <span class="m-item">Deepgram</span><span class="m-sep">·</span>
+      <span class="m-item">AssemblyAI</span><span class="m-sep">·</span>
+      <span class="m-item">Groq</span><span class="m-sep">·</span>
+      <span class="m-item">Gemini</span><span class="m-sep">·</span>
+      <span class="m-item">Cerebras</span><span class="m-sep">·</span>
+      <span class="m-item">OpenAI</span><span class="m-sep">·</span>
+      <span class="m-item">Local Parakeet</span><span class="m-sep">·</span>
+      <span class="m-item">Self-hosted</span><span class="m-sep">·</span>
+    </div>
+  </div>
+
+  <!-- ═══ STATEMENT ═════════════════════════════════════════════════════════ -->
+  <section class="statement">
+    <div class="container">
+      <p class="rule-label mono reveal"><span>01</span> THE IDEA</p>
+      <h2 class="big-statement reveal">
+        Most voice tools lock you to one provider and one workflow.
+        <span class="muted">Grain treats the model as a detail — and the flow as the product.</span>
+      </h2>
+    </div>
+  </section>
+
+  <!-- ═══ ARCHITECTURE — TWO LAYERS ═════════════════════════════════════════ -->
+  <section id="architecture" class="layers">
+    <div class="container">
+      <div class="section-head">
+        <p class="rule-label mono reveal"><span>02</span> ARCHITECTURE</p>
+        <h2 class="section-title reveal">Two layers.<br>Both yours to swap.</h2>
+        <p class="section-lead reveal reveal-d1">
+          Grain separates speech recognition from text processing, and exposes both
+          through OpenAI-compatible endpoints. Bring a hosted API, a self-hosted
+          server, or an on-device model — the workflow never changes.
+        </p>
+      </div>
+
+      <div class="layer-grid">
+        <article class="layer-card reveal">
+          <div class="layer-card-top">
+            <span class="layer-num mono">L1</span>
+            <span class="layer-badge mono">OPENAI-COMPATIBLE</span>
+          </div>
+          <h3>Transcription</h3>
+          <p class="layer-desc">
+            Your speech becomes text through whichever STT backend you choose —
+            cloud for accuracy today, on-device when you need it private.
+          </p>
+          <ul class="ticks">
+            <li>Cloud STT — Deepgram, AssemblyAI, Groq</li>
+            <li>On-device — Local Parakeet, no audio leaves the machine</li>
+            <li>Smart rotation across enabled providers</li>
+          </ul>
+        </article>
+
+        <div class="layer-bridge" aria-hidden="true">
+          <div class="bridge-line"></div>
+          <div class="bridge-node mono">ROUTE</div>
+          <div class="bridge-line"></div>
+        </div>
+
+        <article class="layer-card reveal reveal-d1">
+          <div class="layer-card-top">
+            <span class="layer-num mono">L2</span>
+            <span class="layer-badge mono">OPENAI-COMPATIBLE</span>
+          </div>
+          <h3>Processing</h3>
+          <p class="layer-desc">
+            Hand the transcript to any LLM with your own directive prompt — clean it
+            up, rewrite it, or turn it into an action. Or skip it entirely and paste raw.
+          </p>
+          <ul class="ticks">
+            <li>Any LLM — Gemini, Groq, Cerebras, OpenAI</li>
+            <li>Custom directive prompts per task</li>
+            <li>Vocabulary dictionary for tricky terms</li>
+          </ul>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ WIDGET ════════════════════════════════════════════════════════════ -->
+  <section id="widget" class="widget">
+    <div class="container">
+      <div class="widget-layout">
+        <div class="widget-copy reveal">
+          <p class="rule-label mono"><span>03</span> THE WIDGET</p>
+          <h2 class="section-title">A pill that<br>gets out of the way.</h2>
+          <p class="section-lead">
+            Trigger your hotkey and a small pill appears at your cursor. The left side
+            pulses with your live voice level so you know it's listening. Speak, release,
+            and your text is ready — no window to switch to, no focus stolen.
+          </p>
+          <div class="widget-points">
+            <div class="wp">
+              <span class="wp-k mono">01</span>
+              <span class="wp-v">Always-on-top, frameless, draggable anywhere.</span>
+            </div>
+            <div class="wp">
+              <span class="wp-k mono">02</span>
+              <span class="wp-v">Live voice-level feedback while you talk.</span>
+            </div>
+            <div class="wp">
+              <span class="wp-k mono">03</span>
+              <span class="wp-v">Configurable hotkeys for dictation and voice-to-AI.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="widget-stage reveal reveal-d1">
+          <div class="pill">
+            <span class="pill-rec"></span>
+            <div class="pill-wave" id="pillWave"></div>
+            <span class="pill-key mono">G</span>
+          </div>
+          <p class="pill-caption mono">// voice level, live — nothing else in your way</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ ROUTING ═══════════════════════════════════════════════════════════ -->
+  <section id="routing" class="routing">
+    <div class="container">
+      <div class="section-head">
+        <p class="rule-label mono reveal"><span>04</span> ROUTING ENGINE</p>
+        <h2 class="section-title reveal">It picks the right<br>backend. Quietly.</h2>
+        <p class="section-lead reveal reveal-d1">
+          Grain watches quota, latency, and provider health. When one backend is rate-limited
+          or down, it falls through to the next — invisibly. You just keep speaking.
+        </p>
+      </div>
+
+      <div class="routing-stage reveal">
+        <div class="rstage-col">
+          <span class="rstage-cap mono">SIGNAL</span>
+          <div class="rstage-pill mono">VOICE</div>
+        </div>
+        <div class="rstage-flow">
+          <div class="rflow-line"></div>
+          <div class="rrouter">
+            <span class="rrouter-label mono">ROUTER</span>
+            <div class="rrouter-list">
+              <span class="rprov mono" data-prov>Deepgram</span>
+              <span class="rprov mono" data-prov>AssemblyAI</span>
+              <span class="rprov mono" data-prov>Groq</span>
+              <span class="rprov mono" data-prov>Local Parakeet</span>
+            </div>
+          </div>
+          <div class="rflow-line"></div>
+        </div>
+        <div class="rstage-col">
+          <span class="rstage-cap mono">RESULT</span>
+          <div class="rstage-pill mono">TEXT</div>
+        </div>
+      </div>
+
+      <div class="routing-stats reveal">
+        <div class="rstat"><span class="rstat-n mono">2</span><span class="rstat-l mono">pluggable layers</span></div>
+        <div class="rstat"><span class="rstat-n mono">10+</span><span class="rstat-l mono">supported backends</span></div>
+        <div class="rstat"><span class="rstat-n mono">0</span><span class="rstat-l mono">lock-in</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ OPEN SOURCE ═══════════════════════════════════════════════════════ -->
+  <section id="open" class="open">
+    <div class="container">
+      <div class="open-card reveal">
+        <p class="rule-label mono"><span>05</span> OPEN SOURCE</p>
+        <h2 class="open-title">Voice infrastructure<br>you actually own.</h2>
+        <p class="open-lead">
+          No subscription wall. No provider lock-in. Your keys, your models, your machine.
+          Grain is open source because the layer between you and your tools should be yours.
+        </p>
+        <a href="https://github.com" class="btn btn-solid" data-cursor>Explore on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ DOWNLOAD ══════════════════════════════════════════════════════════ -->
+  <section id="download" class="download">
+    <div class="container">
+      <div class="download-inner">
+        <p class="rule-label mono reveal"><span>06</span> RELEASE</p>
+        <h2 class="download-title reveal">Start speaking.</h2>
+        <p class="download-meta mono reveal">WINDOWS 11 · 64-BIT · FREE &amp; OPEN SOURCE</p>
+        <a href="#" class="btn btn-solid btn-lg reveal" data-cursor>Download for Windows</a>
+        <p class="download-note reveal">No account. No telemetry you didn't ask for.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ FOOTER ════════════════════════════════════════════════════════════ -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-top">
+        <div class="footer-mark">
+          <span class="footer-logo">GRAIN</span>
+          <span class="mono footer-tag">// THE OPEN VOICE LAYER</span>
+        </div>
+        <nav class="footer-nav">
+          <a href="https://github.com">GitHub</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#download">Download</a>
+          <a href="#">License</a>
+        </nav>
+      </div>
+      <div class="footer-bottom mono">
+        <span>© 2026 GRAIN — OPEN SOURCE UNDER MIT</span>
+        <span>BUILT FOR PEOPLE WHO TALK FASTER THAN THEY TYPE</span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
