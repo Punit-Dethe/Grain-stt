@@ -98,6 +98,26 @@ ApplicationWindow {
         var st = pillState
         var isProcessing = (st === "processing")
 
+        // Processing: unified diagonal sweep across every dot in the pill.
+        // Replaces the shuffle entirely — one white wave, bottom-left → top-right.
+        if (isProcessing) {
+            _btnAngle = (_btnAngle + 0.08) % (Math.PI * 2)
+            var procArr = new Array(rows * cols)
+            var wavePos = 15.5 + 13.5 * Math.sin(_btnAngle)
+            for (var pr = 0; pr < rows; pr++) {
+                for (var pc = 0; pc < cols; pc++) {
+                    if (isEdgeCell(pc, pr)) continue
+                    var pd = pc + (7 - pr)
+                    var pBright = Math.max(0.0, 1.0 - Math.abs(pd - wavePos) / 6.0)
+                    procArr[pr * cols + pc] =
+                        "rgba(255,255,255," + (0.03 + pBright * 0.93).toFixed(2) + ")"
+                }
+            }
+            dotStates = procArr
+            dotCanvas.requestPaint()
+            return
+        }
+
         // amplitude_level here is ALREADY fully display-shaped by the isolated
         // VolumeMeterService (noise-gated, normalized to loud-speech reference,
         // sqrt-curved, lightly smoothed). The pill consumes it close to directly,
@@ -199,7 +219,7 @@ ApplicationWindow {
         //             with soft falloff on both sides of the bright peak.
         var btnActive = (st === "recording" || st === "streaming" || isProcessing)
         if (btnActive) {
-            _btnAngle = (_btnAngle + (isProcessing ? 0.10 : 0.16)) % (Math.PI * 2)
+            _btnAngle = (_btnAngle + 0.26) % (Math.PI * 2)
 
             for (var blr = 0; blr < 4; blr++) {
                 for (var blc = 0; blc < 4; blc++) {
