@@ -161,14 +161,14 @@ ApplicationWindow {
                 if (isHot) {
                     // Brightest tier — hot cells
                     color = isProcessing
-                        ? "rgba(255,159,61,0.95)"      // orange for processing
+                        ? "rgba(255,93,30,0.95)"        // signature orange for processing
                         : "rgba(189,193,201,0.92)"      // near-white for recording
                 } else if (isActive) {
                     // Mid tier — active cells with sparkle alpha
                     var sparkle = Math.random() * flicker
                     if (isProcessing) {
                         var a1 = Math.min(0.88, 0.48 + litBase * 0.28 + sparkle)
-                        color = "rgba(255,188,111," + a1.toFixed(2) + ")"  // warm amber
+                        color = "rgba(255,93,30," + a1.toFixed(2) + ")"    // signature orange
                     } else {
                         var a2 = Math.min(0.82, 0.34 + litBase * 0.30 + sparkle)
                         // Multi-tone grey: randomly pick one of 3 grey shades
@@ -184,7 +184,7 @@ ApplicationWindow {
                 } else {
                     // Dim tier — background dots
                     color = isProcessing
-                        ? "rgba(255,159,61,0.14)"       // dim orange tint
+                        ? "rgba(255,93,30,0.14)"        // dim signature orange tint
                         : "rgba(96,102,112,0.30)"        // dim grey (matches reference)
                 }
 
@@ -199,9 +199,9 @@ ApplicationWindow {
         if (btnActive) {
             _btnAngle = (_btnAngle + 0.35) % (Math.PI * 2)
 
-            var cR = 255
-            var cG = isProcessing ? 255 : 93
-            var cB = isProcessing ? 255 : 30
+            // Primary (bright end) and secondary (dim end) colors — no dot ever goes dark
+            var pR = 255, pG = isProcessing ? 255 : 93, pB = isProcessing ? 255 : 30
+            var sR = 40,  sG = 60,  sB = 200  // blue-indigo as the dim color
 
             for (var br = 0; br < 4; br++) {
                 for (var bc = 0; bc < 4; bc++) {
@@ -215,11 +215,12 @@ ApplicationWindow {
                         phase = bc * 1.4 + br * 0.5
                     }
                     var brightness = 0.5 + 0.5 * Math.sin(_btnAngle + phase)
-                    var balpha = isProcessing
-                        ? (0.12 + brightness * 0.88)
-                        : (0.08 + brightness * 0.92)
+                    var cr = Math.round(sR + brightness * (pR - sR))
+                    var cg = Math.round(sG + brightness * (pG - sG))
+                    var cb = Math.round(sB + brightness * (pB - sB))
+                    var balpha = 0.55 + brightness * 0.45
                     arr[(btnRow + br) * cols + (btnCol + bc)] =
-                        "rgba(" + cR + "," + cG + "," + cB + "," + balpha.toFixed(2) + ")"
+                        "rgba(" + cr + "," + cg + "," + cb + "," + balpha.toFixed(2) + ")"
                 }
             }
         } else {
