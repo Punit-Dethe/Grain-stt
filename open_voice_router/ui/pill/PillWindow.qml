@@ -52,8 +52,18 @@ ApplicationWindow {
 
     // ----------------------------------------------------------------
     // Button-zone animation state — independent of mic input
+    // Comet orbits the 12-cell perimeter; inner 2×2 breathes.
     // ----------------------------------------------------------------
-    property real _btnAngle: 0.0
+    property int  _btnTick:       0
+    property int  _btnSubTick:    0
+    property real _btnPulseAngle: 0.0
+
+    readonly property var _btnPerim: [
+        [0,0],[0,1],[0,2],[0,3],
+        [1,3],[2,3],
+        [3,3],[3,2],[3,1],[3,0],
+        [2,0],[1,0]
+    ]
 
     // ----------------------------------------------------------------
     // Curved silhouette for 25x8 grid
@@ -193,44 +203,46 @@ ApplicationWindow {
         }
 
         // ── Button-zone independent animation ────────────────────────
-        // Wave cascade fills all 16 dots.
-        // Recording: diagonal flow (orange). Processing: radial pulse (white).
+        // Comet orbits the 12-cell perimeter; inner 2×2 breathes.
+        // Recording: orange. Processing: white.
         var btnActive = (st === "recording" || st === "streaming" || isProcessing)
         if (btnActive) {
-            _btnAngle = (_btnAngle + 0.35) % (Math.PI * 2)
+            _btnSubTick++
+            if (_btnSubTick >= 2) { _btnSubTick = 0; _btnTick = (_btnTick + 1) % 12 }
+            _btnPulseAngle = (_btnPulseAngle + 0.28) % (Math.PI * 2)
 
-            // Primary (bright end) and secondary (dim end) colors — no dot ever goes dark
-            var pR = 255, pG = isProcessing ? 255 : 93, pB = isProcessing ? 255 : 30
-            var sR = 220, sG = 212, sB = 198  // warm beige as the dim color
+            var cR = 255
+            var cG = isProcessing ? 255 : 93
+            var cB = isProcessing ? 255 : 30
 
-            for (var br = 0; br < 4; br++) {
-                for (var bc = 0; bc < 4; bc++) {
-                    if ((br === 0 || br === 3) && (bc === 0 || bc === 3)) continue
-                    var phase
-                    if (isProcessing) {
-                        var dr = br - 1.5
-                        var dc = bc - 1.5
-                        phase = -Math.sqrt(dr * dr + dc * dc) * 1.6
-                    } else {
-                        phase = bc * 1.4 + br * 0.5
-                    }
-                    var brightness = 0.5 + 0.5 * Math.sin(_btnAngle + phase)
-                    var cr = Math.round(sR + brightness * (pR - sR))
-                    var cg = Math.round(sG + brightness * (pG - sG))
-                    var cb = Math.round(sB + brightness * (pB - sB))
-                    var balpha = 0.55 + brightness * 0.45
-                    arr[(btnRow + br) * cols + (btnCol + bc)] =
-                        "rgba(" + cr + "," + cg + "," + cb + "," + balpha.toFixed(2) + ")"
-                }
+            for (var p = 0; p < 12; p++) {
+                var pr = _btnPerim[p][0]; var pc = _btnPerim[p][1]
+                var pidx = (btnRow + pr) * cols + (btnCol + pc)
+                var dist = (_btnTick - p + 12) % 12
+                var palpha
+                if      (dist === 0) palpha = 1.00
+                else if (dist === 1) palpha = 0.60
+                else if (dist === 2) palpha = 0.28
+                else                 palpha = 0.07
+                arr[pidx] = "rgba(" + cR + "," + cG + "," + cB + "," + palpha.toFixed(2) + ")"
+            }
+
+            var pAlpha = 0.12 + 0.50 * (0.5 + 0.5 * Math.sin(_btnPulseAngle))
+            var innerCells = [[1,1],[1,2],[2,1],[2,2]]
+            for (var ic = 0; ic < 4; ic++) {
+                var ir = innerCells[ic][0]; var icc = innerCells[ic][1]
+                arr[(btnRow + ir) * cols + (btnCol + icc)] =
+                    "rgba(" + cR + "," + cG + "," + cB + "," + pAlpha.toFixed(2) + ")"
             }
         } else {
-            _btnAngle = 0.0
-            for (var bp = 0; bp < 4; bp++) {
-                for (var bq = 0; bq < 4; bq++) {
-                    if ((bp === 0 || bp === 3) && (bq === 0 || bq === 3)) continue
-                    arr[(btnRow + bp) * cols + (btnCol + bq)] = "rgba(0,0,0,0)"
-                }
+            _btnTick = 0; _btnSubTick = 0; _btnPulseAngle = 0.0
+            for (var bp = 0; bp < 12; bp++) {
+                arr[(btnRow + _btnPerim[bp][0]) * cols + (btnCol + _btnPerim[bp][1])] = "rgba(0,0,0,0)"
             }
+            arr[(btnRow+1)*cols+(btnCol+1)] = "rgba(0,0,0,0)"
+            arr[(btnRow+1)*cols+(btnCol+2)] = "rgba(0,0,0,0)"
+            arr[(btnRow+2)*cols+(btnCol+1)] = "rgba(0,0,0,0)"
+            arr[(btnRow+2)*cols+(btnCol+2)] = "rgba(0,0,0,0)"
         }
 
         dotStates = arr
@@ -267,7 +279,9 @@ ApplicationWindow {
                 _acc = 0.0
                 root.dotStates = []
                 root.energy = 0.0
-                root._btnAngle = 0.0
+                root._btnTick = 0
+                root._btnSubTick = 0
+                root._btnPulseAngle = 0.0
                 dotCanvas.requestPaint()
             }
         }
