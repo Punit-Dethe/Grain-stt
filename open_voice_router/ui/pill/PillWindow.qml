@@ -52,16 +52,17 @@ ApplicationWindow {
 
     // ----------------------------------------------------------------
     // Button-zone animation state — independent of mic input
-    // Comet orbits the 12-cell perimeter; inner 2×2 breathes.
+    // 8-cell perimeter (no corners) + inner 2×2.
     // ----------------------------------------------------------------
     property int  _btnTick:       0
     property int  _btnSubTick:    0
     property real _btnPulseAngle: 0.0
 
+    // Clockwise perimeter skipping the 4 corner dots
     readonly property var _btnPerim: [
-        [0,0],[0,1],[0,2],[0,3],
+        [0,1],[0,2],
         [1,3],[2,3],
-        [3,3],[3,2],[3,1],[3,0],
+        [3,2],[3,1],
         [2,0],[1,0]
     ]
 
@@ -203,40 +204,48 @@ ApplicationWindow {
         }
 
         // ── Button-zone independent animation ────────────────────────
-        // Comet orbits the 12-cell perimeter; inner 2×2 breathes.
-        // Recording: orange. Processing: white.
+        // 8 perimeter cells (corners excluded) + inner 2×2.
+        // Recording: orange comet chase. Processing: white heartbeat.
         var btnActive = (st === "recording" || st === "streaming" || isProcessing)
         if (btnActive) {
-            _btnSubTick++
-            if (_btnSubTick >= 2) { _btnSubTick = 0; _btnTick = (_btnTick + 1) % 12 }
-            _btnPulseAngle = (_btnPulseAngle + 0.28) % (Math.PI * 2)
+            _btnPulseAngle = (_btnPulseAngle + 0.22) % (Math.PI * 2)
 
-            var cR = 255
-            var cG = isProcessing ? 255 : 93
-            var cB = isProcessing ? 255 : 30
+            if (!isProcessing) {
+                // ── Recording: orange comet on 8-cell perimeter ──────
+                _btnSubTick++
+                if (_btnSubTick >= 2) { _btnSubTick = 0; _btnTick = (_btnTick + 1) % 8 }
 
-            for (var p = 0; p < 12; p++) {
-                var pr = _btnPerim[p][0]; var pc = _btnPerim[p][1]
-                var pidx = (btnRow + pr) * cols + (btnCol + pc)
-                var dist = (_btnTick - p + 12) % 12
-                var palpha
-                if      (dist === 0) palpha = 1.00
-                else if (dist === 1) palpha = 0.60
-                else if (dist === 2) palpha = 0.28
-                else                 palpha = 0.07
-                arr[pidx] = "rgba(" + cR + "," + cG + "," + cB + "," + palpha.toFixed(2) + ")"
-            }
-
-            var pAlpha = 0.12 + 0.50 * (0.5 + 0.5 * Math.sin(_btnPulseAngle))
-            var innerCells = [[1,1],[1,2],[2,1],[2,2]]
-            for (var ic = 0; ic < 4; ic++) {
-                var ir = innerCells[ic][0]; var icc = innerCells[ic][1]
-                arr[(btnRow + ir) * cols + (btnCol + icc)] =
-                    "rgba(" + cR + "," + cG + "," + cB + "," + pAlpha.toFixed(2) + ")"
+                for (var p = 0; p < 8; p++) {
+                    var dist = (_btnTick - p + 8) % 8
+                    var palpha
+                    if      (dist === 0) palpha = 1.00
+                    else if (dist === 1) palpha = 0.55
+                    else if (dist === 2) palpha = 0.22
+                    else                 palpha = 0.07
+                    arr[(btnRow + _btnPerim[p][0]) * cols + (btnCol + _btnPerim[p][1])] =
+                        "rgba(255,93,30," + palpha.toFixed(2) + ")"
+                }
+                // Inner 4 — very dim
+                arr[(btnRow+1)*cols+(btnCol+1)] = "rgba(255,93,30,0.08)"
+                arr[(btnRow+1)*cols+(btnCol+2)] = "rgba(255,93,30,0.08)"
+                arr[(btnRow+2)*cols+(btnCol+1)] = "rgba(255,93,30,0.08)"
+                arr[(btnRow+2)*cols+(btnCol+2)] = "rgba(255,93,30,0.08)"
+            } else {
+                // ── Processing: white heartbeat — inner leads, perimeter lags ──
+                var innerA = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(_btnPulseAngle))
+                var perimA = 0.08 + 0.42 * (0.5 + 0.5 * Math.sin(_btnPulseAngle - 0.9))
+                for (var p2 = 0; p2 < 8; p2++) {
+                    arr[(btnRow + _btnPerim[p2][0]) * cols + (btnCol + _btnPerim[p2][1])] =
+                        "rgba(255,255,255," + perimA.toFixed(2) + ")"
+                }
+                arr[(btnRow+1)*cols+(btnCol+1)] = "rgba(255,255,255," + innerA.toFixed(2) + ")"
+                arr[(btnRow+1)*cols+(btnCol+2)] = "rgba(255,255,255," + innerA.toFixed(2) + ")"
+                arr[(btnRow+2)*cols+(btnCol+1)] = "rgba(255,255,255," + innerA.toFixed(2) + ")"
+                arr[(btnRow+2)*cols+(btnCol+2)] = "rgba(255,255,255," + innerA.toFixed(2) + ")"
             }
         } else {
             _btnTick = 0; _btnSubTick = 0; _btnPulseAngle = 0.0
-            for (var bp = 0; bp < 12; bp++) {
+            for (var bp = 0; bp < 8; bp++) {
                 arr[(btnRow + _btnPerim[bp][0]) * cols + (btnCol + _btnPerim[bp][1])] = "rgba(0,0,0,0)"
             }
             arr[(btnRow+1)*cols+(btnCol+1)] = "rgba(0,0,0,0)"
