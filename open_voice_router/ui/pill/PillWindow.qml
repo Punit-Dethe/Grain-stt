@@ -238,13 +238,9 @@ ApplicationWindow {
                     var dr = blr - 1.5; var dc = blc - 1.5
                     var rdist = Math.sqrt(dr * dr + dc * dc)
                     var brightness = 0.5 + 0.5 * Math.sin(_btnAngle - rdist * 1.4)
-
-                    // Baseline white fades into orange as ripple brightens — no pixel ever goes dark
-                    var bG = Math.round(255 - brightness * 162)  // 255 → 93
-                    var bB = Math.round(255 - brightness * 225)  // 255 → 30
-                    var balpha = 0.18 + brightness * 0.77
+                    var balpha = 0.04 + brightness * 0.96
                     arr[(btnRow + blr) * cols + (btnCol + blc)] =
-                        "rgba(255," + bG + "," + bB + "," + balpha.toFixed(2) + ")"
+                        "rgba(255,93,30," + balpha.toFixed(2) + ")"
                 }
             }
         } else {
