@@ -201,7 +201,7 @@ ApplicationWindow {
 
             // Primary (bright end) and secondary (dim end) colors — no dot ever goes dark
             var pR = 255, pG = isProcessing ? 255 : 93, pB = isProcessing ? 255 : 30
-            var sR = 40,  sG = 60,  sB = 200  // blue-indigo as the dim color
+            var sR = 220, sG = 212, sB = 198  // warm beige as the dim color
 
             for (var br = 0; br < 4; br++) {
                 for (var bc = 0; bc < 4; bc++) {
