@@ -52,19 +52,8 @@ ApplicationWindow {
 
     // ----------------------------------------------------------------
     // Button-zone animation state — independent of mic input
-    // 12-cell perimeter orbit (comet) + inner 2x2 pulse.
-    // Perimeter order: clockwise from top-left of the 4x4 zone.
     // ----------------------------------------------------------------
-    property int  _btnTick:       0     // head position on perimeter (0-11)
-    property int  _btnSubTick:    0     // sub-tick so head advances every 2 frames
-    property real _btnPulseAngle: 0.0   // sine angle for inner-cell breathing
-
-    readonly property var _btnPerim: [
-        [0,0],[0,1],[0,2],[0,3],
-        [1,3],[2,3],
-        [3,3],[3,2],[3,1],[3,0],
-        [2,0],[1,0]
-    ]
+    property real _btnAngle: 0.0
 
     // ----------------------------------------------------------------
     // Curved silhouette for 25x8 grid
@@ -200,57 +189,41 @@ ApplicationWindow {
         }
 
         // ── Button-zone independent animation ────────────────────────
-        // Comet orbits the 12-cell perimeter; inner 2x2 breathes.
-        // Color: orange in recording, white in processing.
+        // Wave cascade fills all 16 dots.
+        // Recording: diagonal flow (orange). Processing: radial pulse (white).
         var btnActive = (st === "recording" || st === "streaming" || isProcessing)
         if (btnActive) {
-            // Advance head every 2 frames (~150 ms/step → ~0.55 rev/sec)
-            _btnSubTick++
-            if (_btnSubTick >= 2) {
-                _btnSubTick = 0
-                _btnTick = (_btnTick + 1) % 12
-            }
-            // Pulse angle for inner cells
-            _btnPulseAngle = (_btnPulseAngle + 0.28) % (Math.PI * 2)
+            _btnAngle = (_btnAngle + 0.35) % (Math.PI * 2)
 
             var cR = 255
             var cG = isProcessing ? 255 : 93
             var cB = isProcessing ? 255 : 30
 
-            // Perimeter cells — comet with 3-dot tail
-            for (var p = 0; p < 12; p++) {
-                var pr = _btnPerim[p][0]
-                var pc = _btnPerim[p][1]
-                var pidx = (btnRow + pr) * cols + (btnCol + pc)
-                // clockwise distance from head (wraps)
-                var dist = (_btnTick - p + 12) % 12
-                var palpha
-                if      (dist === 0) palpha = 1.00
-                else if (dist === 1) palpha = 0.60
-                else if (dist === 2) palpha = 0.28
-                else                 palpha = 0.07
-                arr[pidx] = "rgba(" + cR + "," + cG + "," + cB + "," + palpha.toFixed(2) + ")"
-            }
-
-            // Inner 2x2 — breathing pulse
-            var pAlpha = 0.12 + 0.50 * (0.5 + 0.5 * Math.sin(_btnPulseAngle))
-            var innerCells = [[1,1],[1,2],[2,1],[2,2]]
-            for (var ic = 0; ic < 4; ic++) {
-                var ir = innerCells[ic][0]
-                var icc = innerCells[ic][1]
-                arr[(btnRow + ir) * cols + (btnCol + icc)] =
-                    "rgba(" + cR + "," + cG + "," + cB + "," + pAlpha.toFixed(2) + ")"
+            for (var br = 0; br < 4; br++) {
+                for (var bc = 0; bc < 4; bc++) {
+                    var phase
+                    if (isProcessing) {
+                        var dr = br - 1.5
+                        var dc = bc - 1.5
+                        phase = -Math.sqrt(dr * dr + dc * dc) * 1.6
+                    } else {
+                        phase = bc * 1.4 + br * 0.5
+                    }
+                    var brightness = 0.5 + 0.5 * Math.sin(_btnAngle + phase)
+                    var balpha = isProcessing
+                        ? (0.12 + brightness * 0.88)
+                        : (0.08 + brightness * 0.92)
+                    arr[(btnRow + br) * cols + (btnCol + bc)] =
+                        "rgba(" + cR + "," + cG + "," + cB + "," + balpha.toFixed(2) + ")"
+                }
             }
         } else {
-            // Idle — clear button zone and reset tick
-            _btnTick = 0; _btnSubTick = 0; _btnPulseAngle = 0.0
-            for (var bp = 0; bp < 12; bp++) {
-                arr[(btnRow + _btnPerim[bp][0]) * cols + (btnCol + _btnPerim[bp][1])] = "rgba(0,0,0,0)"
+            _btnAngle = 0.0
+            for (var bp = 0; bp < 4; bp++) {
+                for (var bq = 0; bq < 4; bq++) {
+                    arr[(btnRow + bp) * cols + (btnCol + bq)] = "rgba(0,0,0,0)"
+                }
             }
-            arr[(btnRow+1)*cols+(btnCol+1)] = "rgba(0,0,0,0)"
-            arr[(btnRow+1)*cols+(btnCol+2)] = "rgba(0,0,0,0)"
-            arr[(btnRow+2)*cols+(btnCol+1)] = "rgba(0,0,0,0)"
-            arr[(btnRow+2)*cols+(btnCol+2)] = "rgba(0,0,0,0)"
         }
 
         dotStates = arr
@@ -287,9 +260,7 @@ ApplicationWindow {
                 _acc = 0.0
                 root.dotStates = []
                 root.energy = 0.0
-                root._btnTick = 0
-                root._btnSubTick = 0
-                root._btnPulseAngle = 0.0
+                root._btnAngle = 0.0
                 dotCanvas.requestPaint()
             }
         }
@@ -362,38 +333,20 @@ ApplicationWindow {
     }
 
     // ----------------------------------------------------------------
-    // Confirm button — plain capital "G", no background
+    // Confirm button — invisible click zone over button grid
     // ----------------------------------------------------------------
     Item {
-        readonly property real zoneX: root.btnCol  * root.cell + 1
-        readonly property real zoneY: root.btnRow  * root.cell + 1
-        readonly property real zoneW: root.btnSpan * root.cell
-        readonly property real zoneH: root.btnSpan * root.cell
-
-        x: zoneX + (zoneW - 16) / 2
-        y: zoneY + (zoneH - 16) / 2
-        width: 16
-        height: 16
+        x: root.btnCol  * root.cell + 1
+        y: root.btnRow  * root.cell + 1
+        width:  root.btnSpan * root.cell
+        height: root.btnSpan * root.cell
 
         visible: root.pillState === "recording" || root.pillState === "streaming" || root.pillState === "processing"
-
-        Text {
-            anchors.centerIn: parent
-            text: "G"
-            color: root.pillState === "processing"
-                   ? (btnHover.containsMouse ? "#FF8040" : "#FF5D1E")
-                   : (btnHover.containsMouse ? "#e0e4ec" : "#9098a8")
-            font.pixelSize: 13
-            font.bold: true
-            Behavior on color { ColorAnimation { duration: 80 } }
-        }
 
         MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
             onClicked: { if (pillViewModel) pillViewModel.on_confirm_clicked() }
         }
-
-        HoverHandler { id: btnHover }
     }
 }
