@@ -311,7 +311,7 @@ ApplicationWindow {
     Rectangle {
         x: root.cell - 2
         y: 0
-        width:  (root.cols - 2) * root.cell + 6
+        width:  (root.cols - 2) * root.cell + 5
         height: parent.height
         color: "#000000"
         radius: height / 2
