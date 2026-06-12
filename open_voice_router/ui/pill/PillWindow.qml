@@ -309,9 +309,9 @@ ApplicationWindow {
     // dot columns (cols 1–23), one cell inset on each side.
     // ----------------------------------------------------------------
     Rectangle {
-        x: root.cell
+        x: root.cell - 2
         y: 0
-        width:  (root.cols - 2) * root.cell + 2
+        width:  (root.cols - 2) * root.cell + 6
         height: parent.height
         color: "#000000"
         radius: height / 2
