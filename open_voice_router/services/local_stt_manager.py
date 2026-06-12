@@ -26,6 +26,7 @@ Signals (Qt main thread):
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -73,6 +74,25 @@ _MODEL_NAME = "parakeet-tdt-0.6b-v3"
 _PROVIDER_ID = "local-parakeet"
 
 
+def _find_system_python() -> str:
+    """Return a real Python interpreter for venv creation.
+
+    In a frozen PyInstaller build sys.executable is GrainSTT.exe, not Python.
+    Search PATH for an actual interpreter instead.
+    """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    for name in ("python", "python3", "python3.12", "python3.11", "python3.10", "python3.9"):
+        found = shutil.which(name)
+        if found:
+            return found
+    raise RuntimeError(
+        "Python 3.9+ not found in PATH.\n"
+        "Please install Python from https://python.org and check "
+        "'Add Python to PATH' during setup."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Install worker
 # ---------------------------------------------------------------------------
@@ -111,7 +131,7 @@ class _InstallWorker(QRunnable):
         if not _VENV_PYTHON.exists():
             self._emit("Creating isolated Python environment…")
             result = subprocess.run(
-                [sys.executable, "-m", "venv", str(_VENV_DIR)],
+                [_find_system_python(), "-m", "venv", str(_VENV_DIR)],
                 capture_output=True,
                 text=True,
             )
