@@ -305,14 +305,14 @@ ApplicationWindow {
     }
 
     // ----------------------------------------------------------------
-    // Dark pill background — spans only the visible dot rows (1–6),
-    // leaving the transparent window edges above and below intact.
+    // Dark pill background — full height, width trimmed to the visible
+    // dot columns (cols 1–23), one cell inset on each side.
     // ----------------------------------------------------------------
     Rectangle {
-        x: 0
-        y: root.cell
-        width:  parent.width
-        height: 6 * root.cell + 2
+        x: root.cell
+        y: 0
+        width:  (root.cols - 2) * root.cell + 2
+        height: parent.height
         color: "#000000"
         radius: height / 2
         border.color: "#1a1a1a"
