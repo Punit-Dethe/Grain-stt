@@ -103,12 +103,17 @@ ApplicationWindow {
         if (isProcessing) {
             _btnAngle = (_btnAngle + 0.08) % (Math.PI * 2)
             var procArr = new Array(rows * cols)
-            var wavePos = 15.5 + 13.5 * Math.sin(_btnAngle)
+            var w1 = 15.5 + 13.5 * Math.sin(_btnAngle)
+            var w2 = 15.5 + 13.5 * Math.sin(_btnAngle + 2.094)
+            var w3 = 15.5 + 13.5 * Math.sin(_btnAngle + 4.189)
             for (var pr = 0; pr < rows; pr++) {
                 for (var pc = 0; pc < cols; pc++) {
                     if (isEdgeCell(pc, pr)) continue
                     var pd = pc + (7 - pr)
-                    var pBright = Math.max(0.0, 1.0 - Math.abs(pd - wavePos) / 6.0)
+                    var pBright = Math.min(1.0,
+                        Math.max(0.0, 1.0 - Math.abs(pd - w1) / 6.0) +
+                        Math.max(0.0, 1.0 - Math.abs(pd - w2) / 6.0) +
+                        Math.max(0.0, 1.0 - Math.abs(pd - w3) / 6.0))
                     procArr[pr * cols + pc] =
                         "rgba(255,255,255," + (0.03 + pBright * 0.93).toFixed(2) + ")"
                 }
