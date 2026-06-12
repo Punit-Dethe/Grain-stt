@@ -52,19 +52,8 @@ ApplicationWindow {
 
     // ----------------------------------------------------------------
     // Button-zone animation state — independent of mic input
-    // 8-cell perimeter (no corners) + inner 2×2.
     // ----------------------------------------------------------------
-    property int  _btnTick:       0
-    property int  _btnSubTick:    0
-    property real _btnPulseAngle: 0.0
-
-    // Clockwise perimeter skipping the 4 corner dots
-    readonly property var _btnPerim: [
-        [0,1],[0,2],
-        [1,3],[2,3],
-        [3,2],[3,1],
-        [2,0],[1,0]
-    ]
+    property real _btnAngle: 0.0
 
     // ----------------------------------------------------------------
     // Curved silhouette for 25x8 grid
@@ -204,54 +193,46 @@ ApplicationWindow {
         }
 
         // ── Button-zone independent animation ────────────────────────
-        // 8 perimeter cells (corners excluded) + inner 2×2.
-        // Recording: orange comet chase. Processing: white heartbeat.
+        // 12 cells: 4×4 minus 4 corners. Two distinct animations.
+        // Recording: orange radial ripple — center pulses first, perimeter lags.
+        // Processing: white diagonal spotlight — sweeps bottom-left → top-right
+        //             with soft falloff on both sides of the bright peak.
         var btnActive = (st === "recording" || st === "streaming" || isProcessing)
         if (btnActive) {
-            _btnPulseAngle = (_btnPulseAngle + 0.22) % (Math.PI * 2)
+            _btnAngle = (_btnAngle + (isProcessing ? 0.10 : 0.16)) % (Math.PI * 2)
 
-            if (!isProcessing) {
-                // ── Recording: orange comet on 8-cell perimeter ──────
-                _btnSubTick++
-                if (_btnSubTick >= 2) { _btnSubTick = 0; _btnTick = (_btnTick + 1) % 8 }
+            for (var blr = 0; blr < 4; blr++) {
+                for (var blc = 0; blc < 4; blc++) {
+                    if ((blr === 0 || blr === 3) && (blc === 0 || blc === 3)) continue
 
-                for (var p = 0; p < 8; p++) {
-                    var dist = (_btnTick - p + 8) % 8
-                    var palpha
-                    if      (dist === 0) palpha = 1.00
-                    else if (dist === 1) palpha = 0.55
-                    else if (dist === 2) palpha = 0.22
-                    else                 palpha = 0.07
-                    arr[(btnRow + _btnPerim[p][0]) * cols + (btnCol + _btnPerim[p][1])] =
-                        "rgba(255,93,30," + palpha.toFixed(2) + ")"
+                    var brightness
+                    if (isProcessing) {
+                        // Diagonal spotlight: d increases from bottom-left (1) to top-right (5)
+                        var d = blc + (3 - blr)          // range 1–5 for non-corner cells
+                        var wavePos = 3.0 + 2.2 * Math.sin(_btnAngle)  // oscillates 0.8 ↔ 5.2
+                        var dd = Math.abs(d - wavePos)
+                        brightness = Math.max(0.0, 1.0 - dd / 1.8)
+                    } else {
+                        // Radial ripple: inner cells lead, perimeter lags by distance
+                        var dr = blr - 1.5; var dc = blc - 1.5
+                        var rdist = Math.sqrt(dr * dr + dc * dc)  // 0.7 inner → ~2.1 perimeter
+                        brightness = 0.5 + 0.5 * Math.sin(_btnAngle - rdist * 1.4)
+                    }
+
+                    var balpha = 0.04 + brightness * 0.96
+                    var bR = 255, bG = isProcessing ? 255 : 93, bB = isProcessing ? 255 : 30
+                    arr[(btnRow + blr) * cols + (btnCol + blc)] =
+                        "rgba(" + bR + "," + bG + "," + bB + "," + balpha.toFixed(2) + ")"
                 }
-                // Inner 4 — very dim
-                arr[(btnRow+1)*cols+(btnCol+1)] = "rgba(255,93,30,0.08)"
-                arr[(btnRow+1)*cols+(btnCol+2)] = "rgba(255,93,30,0.08)"
-                arr[(btnRow+2)*cols+(btnCol+1)] = "rgba(255,93,30,0.08)"
-                arr[(btnRow+2)*cols+(btnCol+2)] = "rgba(255,93,30,0.08)"
-            } else {
-                // ── Processing: white heartbeat — inner leads, perimeter lags ──
-                var innerA = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(_btnPulseAngle))
-                var perimA = 0.08 + 0.42 * (0.5 + 0.5 * Math.sin(_btnPulseAngle - 0.9))
-                for (var p2 = 0; p2 < 8; p2++) {
-                    arr[(btnRow + _btnPerim[p2][0]) * cols + (btnCol + _btnPerim[p2][1])] =
-                        "rgba(255,255,255," + perimA.toFixed(2) + ")"
-                }
-                arr[(btnRow+1)*cols+(btnCol+1)] = "rgba(255,255,255," + innerA.toFixed(2) + ")"
-                arr[(btnRow+1)*cols+(btnCol+2)] = "rgba(255,255,255," + innerA.toFixed(2) + ")"
-                arr[(btnRow+2)*cols+(btnCol+1)] = "rgba(255,255,255," + innerA.toFixed(2) + ")"
-                arr[(btnRow+2)*cols+(btnCol+2)] = "rgba(255,255,255," + innerA.toFixed(2) + ")"
             }
         } else {
-            _btnTick = 0; _btnSubTick = 0; _btnPulseAngle = 0.0
-            for (var bp = 0; bp < 8; bp++) {
-                arr[(btnRow + _btnPerim[bp][0]) * cols + (btnCol + _btnPerim[bp][1])] = "rgba(0,0,0,0)"
+            _btnAngle = 0.0
+            for (var blr2 = 0; blr2 < 4; blr2++) {
+                for (var blc2 = 0; blc2 < 4; blc2++) {
+                    if ((blr2 === 0 || blr2 === 3) && (blc2 === 0 || blc2 === 3)) continue
+                    arr[(btnRow + blr2) * cols + (btnCol + blc2)] = "rgba(0,0,0,0)"
+                }
             }
-            arr[(btnRow+1)*cols+(btnCol+1)] = "rgba(0,0,0,0)"
-            arr[(btnRow+1)*cols+(btnCol+2)] = "rgba(0,0,0,0)"
-            arr[(btnRow+2)*cols+(btnCol+1)] = "rgba(0,0,0,0)"
-            arr[(btnRow+2)*cols+(btnCol+2)] = "rgba(0,0,0,0)"
         }
 
         dotStates = arr
@@ -288,9 +269,7 @@ ApplicationWindow {
                 _acc = 0.0
                 root.dotStates = []
                 root.energy = 0.0
-                root._btnTick = 0
-                root._btnSubTick = 0
-                root._btnPulseAngle = 0.0
+                root._btnAngle = 0.0
                 dotCanvas.requestPaint()
             }
         }
