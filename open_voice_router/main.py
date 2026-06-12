@@ -48,6 +48,7 @@ else:
     _PKG_DIR = Path(__file__).parent
 _UI_DIR = _PKG_DIR / "ui"
 _FONTS_DIR = _PKG_DIR / "assets" / "fonts"
+_ICON_PATH = _PKG_DIR / "assets" / "grain.ico"
 _PILL_QML = _UI_DIR / "pill" / "PillWindow.qml"
 _CONSOLE_QML = _UI_DIR / "console" / "ConsoleWindow.qml"
 
@@ -335,9 +336,14 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 8. System tray icon and context menu (Requirements 1.1, 1.2)
     # ------------------------------------------------------------------
-    icon = app.style().standardIcon(app.style().StandardPixmap.SP_ComputerIcon)
+    from PySide6.QtGui import QIcon
+    if _ICON_PATH.exists():
+        icon = QIcon(str(_ICON_PATH))
+    else:
+        icon = app.style().standardIcon(app.style().StandardPixmap.SP_ComputerIcon)
+    app.setWindowIcon(icon)
     tray = QSystemTrayIcon(icon, parent=app)
-    tray.setToolTip("Open Voice Router")
+    tray.setToolTip("Grain")
 
     menu = QMenu()
 

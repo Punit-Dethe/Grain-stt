@@ -43,7 +43,7 @@ LZMAUseSeparateProcess=yes
 ; Output
 OutputDir=installer
 OutputBaseFilename=GrainSTT-Setup
-SetupIconFile=
+SetupIconFile=open_voice_router\assets\grain.ico
 
 ; Windows version guard — Win 10 1809+ (build 17763)
 MinVersion=10.0.17763

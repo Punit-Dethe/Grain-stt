@@ -21,6 +21,9 @@ datas = [
     # not installed.
     (str(ROOT / "open_voice_router" / "assets" / "fonts"), "open_voice_router/assets/fonts"),
 
+    # App icon — bundled so the tray can load it at runtime from sys._MEIPASS
+    (str(ROOT / "open_voice_router" / "assets" / "grain.ico"), "open_voice_router/assets"),
+
     # Local ASR server is spawned as a subprocess under the user's own venv
     # Python (not the bundled interpreter), so it must live as a plain .py
     # file that the venv Python can execute directly.
@@ -96,7 +99,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon="assets/grain.ico",  # uncomment when you have an icon file
+    icon=str(ROOT / "open_voice_router" / "assets" / "grain.ico"),
 )
 
 # ---------------------------------------------------------------------------
