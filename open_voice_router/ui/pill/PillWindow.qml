@@ -116,10 +116,10 @@ ApplicationWindow {
                         var wpos = (lead + wi * spacing) % totalD
                         var dd = Math.abs(pd - wpos)
                         dd = Math.min(dd, totalD - dd)  // wrap-around distance
-                        pBright = Math.max(pBright, Math.max(0.0, 1.0 - dd / 5.5))
+                        pBright = Math.max(pBright, Math.max(0.0, 1.0 - dd / 3.5))
                     }
                     procArr[pr * cols + pc] =
-                        "rgba(255,255,255," + (0.03 + pBright * 0.93).toFixed(2) + ")"
+                        "rgba(255,93,30," + (0.03 + pBright * 0.93).toFixed(2) + ")"
                 }
             }
             dotStates = procArr
@@ -234,24 +234,17 @@ ApplicationWindow {
                 for (var blc = 0; blc < 4; blc++) {
                     if ((blr === 0 || blr === 3) && (blc === 0 || blc === 3)) continue
 
-                    var brightness
-                    if (isProcessing) {
-                        // Diagonal spotlight: d increases from bottom-left (1) to top-right (5)
-                        var d = blc + (3 - blr)          // range 1–5 for non-corner cells
-                        var wavePos = 3.0 + 2.2 * Math.sin(_btnAngle)  // oscillates 0.8 ↔ 5.2
-                        var dd = Math.abs(d - wavePos)
-                        brightness = Math.max(0.0, 1.0 - dd / 1.8)
-                    } else {
-                        // Radial ripple: inner cells lead, perimeter lags by distance
-                        var dr = blr - 1.5; var dc = blc - 1.5
-                        var rdist = Math.sqrt(dr * dr + dc * dc)  // 0.7 inner → ~2.1 perimeter
-                        brightness = 0.5 + 0.5 * Math.sin(_btnAngle - rdist * 1.4)
-                    }
+                    // Radial ripple — inner cells lead, perimeter lags
+                    var dr = blr - 1.5; var dc = blc - 1.5
+                    var rdist = Math.sqrt(dr * dr + dc * dc)
+                    var brightness = 0.5 + 0.5 * Math.sin(_btnAngle - rdist * 1.4)
 
-                    var balpha = 0.04 + brightness * 0.96
-                    var bR = 255, bG = isProcessing ? 255 : 93, bB = isProcessing ? 255 : 30
+                    // Baseline white fades into orange as ripple brightens — no pixel ever goes dark
+                    var bG = Math.round(255 - brightness * 162)  // 255 → 93
+                    var bB = Math.round(255 - brightness * 225)  // 255 → 30
+                    var balpha = 0.18 + brightness * 0.77
                     arr[(btnRow + blr) * cols + (btnCol + blc)] =
-                        "rgba(" + bR + "," + bG + "," + bB + "," + balpha.toFixed(2) + ")"
+                        "rgba(255," + bG + "," + bB + "," + balpha.toFixed(2) + ")"
                 }
             }
         } else {
