@@ -11,7 +11,7 @@ ApplicationWindow {
     flags: Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
 
     readonly property int cols: 25
-    readonly property int rows: 8
+    readonly property int rows: 6
     readonly property int dotD: 3      // dot diameter px (slightly smaller than original 4)
     readonly property int gap:  2      // gap between dots (same as original)
     readonly property int cell: dotD + gap   // 5px per cell
@@ -20,9 +20,9 @@ ApplicationWindow {
     height: rows * cell + 2
 
     // Button zone: 4x4 at right side, 3 cols from right edge
-    // Cols 18–21, rows 2–5
+    // Cols 18–21, rows 1–4
     readonly property int btnCol:  18
-    readonly property int btnRow:  2
+    readonly property int btnRow:  1
     readonly property int btnSpan: 4
 
     color: "transparent"
@@ -55,15 +55,14 @@ ApplicationWindow {
     property real _btnAngle: 0.0
 
     // ----------------------------------------------------------------
-    // Curved silhouette for 25x8 grid.
+    // Curved silhouette for 25x6 grid.
     // Col 0/24: fully hidden.
-    // Col 1/23: rows 2-5 only (one dot trimmed from top and bottom).
-    // Col 2/22: rows 1-6 only.
+    // Col 1/23: rows 1-4 only (same 4-dot band, centred in the 6 rows).
+    // Col 2+:   all 6 rows visible.
     // ----------------------------------------------------------------
     function isEdgeCell(c, r) {
         if (c === 0 || c === cols - 1) return true
-        if (c === 1 || c === cols - 2) return (r < 2 || r > 5)
-        if (c === 2 || c === cols - 3) return (r < 1 || r > 6)
+        if (c === 1 || c === cols - 2) return (r < 1 || r > 4)
         return false
     }
 
@@ -105,13 +104,13 @@ ApplicationWindow {
             _btnAngle = (_btnAngle + 0.08) % (Math.PI * 2)
             var procArr = new Array(rows * cols)
             // Three bands, evenly spaced, sliding in one direction
-            var totalD  = 31.0
+            var totalD  = 30.0
             var spacing = totalD / 3.0
             var lead    = (_btnAngle / (Math.PI * 2)) * totalD
             for (var pr = 0; pr < rows; pr++) {
                 for (var pc = 0; pc < cols; pc++) {
                     if (isEdgeCell(pc, pr)) continue
-                    var pd = pc + (7 - pr)      // diagonal coord 0–31
+                    var pd = pc + (5 - pr)      // diagonal coord 0–29
                     var pBright = 0.0
                     for (var wi = 0; wi < 3; wi++) {
                         var wpos = (lead + wi * spacing) % totalD
