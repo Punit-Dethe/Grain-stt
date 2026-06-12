@@ -67,8 +67,12 @@ ApplicationWindow {
     }
 
     function isButtonZone(c, r) {
-        return c >= btnCol && c < btnCol + btnSpan &&
-               r >= btnRow && r < btnRow + btnSpan
+        if (!(c >= btnCol && c < btnCol + btnSpan &&
+              r >= btnRow && r < btnRow + btnSpan)) return false
+        // four corners become normal sound-reactive dots
+        var lc = c - btnCol; var lr = r - btnRow
+        if ((lc === 0 || lc === 3) && (lr === 0 || lr === 3)) return false
+        return true
     }
 
     // ----------------------------------------------------------------
@@ -201,6 +205,7 @@ ApplicationWindow {
 
             for (var br = 0; br < 4; br++) {
                 for (var bc = 0; bc < 4; bc++) {
+                    if ((br === 0 || br === 3) && (bc === 0 || bc === 3)) continue
                     var phase
                     if (isProcessing) {
                         var dr = br - 1.5
@@ -221,6 +226,7 @@ ApplicationWindow {
             _btnAngle = 0.0
             for (var bp = 0; bp < 4; bp++) {
                 for (var bq = 0; bq < 4; bq++) {
+                    if ((bp === 0 || bp === 3) && (bq === 0 || bq === 3)) continue
                     arr[(btnRow + bp) * cols + (btnCol + bq)] = "rgba(0,0,0,0)"
                 }
             }
