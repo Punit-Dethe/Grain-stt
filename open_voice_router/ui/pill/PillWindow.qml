@@ -103,17 +103,21 @@ ApplicationWindow {
         if (isProcessing) {
             _btnAngle = (_btnAngle + 0.08) % (Math.PI * 2)
             var procArr = new Array(rows * cols)
-            var w1 = 15.5 + 13.5 * Math.sin(_btnAngle)
-            var w2 = 15.5 + 13.5 * Math.sin(_btnAngle + 2.094)
-            var w3 = 15.5 + 13.5 * Math.sin(_btnAngle + 4.189)
+            // Three bands, evenly spaced, sliding in one direction
+            var totalD  = 31.0
+            var spacing = totalD / 3.0          // ~10.3 apart
+            var lead    = (_btnAngle / (Math.PI * 2)) * totalD  // 0 → 31 per cycle
             for (var pr = 0; pr < rows; pr++) {
                 for (var pc = 0; pc < cols; pc++) {
                     if (isEdgeCell(pc, pr)) continue
-                    var pd = pc + (7 - pr)
-                    var pBright = Math.min(1.0,
-                        Math.max(0.0, 1.0 - Math.abs(pd - w1) / 6.0) +
-                        Math.max(0.0, 1.0 - Math.abs(pd - w2) / 6.0) +
-                        Math.max(0.0, 1.0 - Math.abs(pd - w3) / 6.0))
+                    var pd = pc + (7 - pr)      // diagonal coord 0–31
+                    var pBright = 0.0
+                    for (var wi = 0; wi < 3; wi++) {
+                        var wpos = (lead + wi * spacing) % totalD
+                        var dd = Math.abs(pd - wpos)
+                        dd = Math.min(dd, totalD - dd)  // wrap-around distance
+                        pBright = Math.max(pBright, Math.max(0.0, 1.0 - dd / 5.5))
+                    }
                     procArr[pr * cols + pc] =
                         "rgba(255,255,255," + (0.03 + pBright * 0.93).toFixed(2) + ")"
                 }
