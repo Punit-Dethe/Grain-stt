@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,16 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
     assert loaded == original
 
 
+def _assert_equals_defaults(result: AppSettings) -> None:
+    """Compare against fresh defaults, ignoring prompt ids — each
+    AppSettings.defaults() call generates new random prompt UUIDs by design."""
+    defaults = AppSettings.defaults()
+    result_prompts = [replace(p, id="") for p in result.prompts]
+    default_prompts = [replace(p, id="") for p in defaults.prompts]
+    assert result_prompts == default_prompts
+    assert replace(result, prompts=[]) == replace(defaults, prompts=[])
+
+
 def test_load_missing_file_returns_defaults(tmp_path: Path) -> None:
     """Loading from a non-existent path should return AppSettings.defaults()."""
     config_file = tmp_path / "nonexistent" / "settings.json"
@@ -69,7 +80,7 @@ def test_load_missing_file_returns_defaults(tmp_path: Path) -> None:
 
     result = store.load()
 
-    assert result == AppSettings.defaults()
+    _assert_equals_defaults(result)
 
 
 def test_load_corrupt_file_returns_defaults(tmp_path: Path) -> None:
@@ -80,7 +91,7 @@ def test_load_corrupt_file_returns_defaults(tmp_path: Path) -> None:
     store = SettingsStore(path=config_file)
     result = store.load()
 
-    assert result == AppSettings.defaults()
+    _assert_equals_defaults(result)
 
 
 def test_quota_counters_persist(tmp_path: Path) -> None:
@@ -306,3 +317,53 @@ def test_unload_idle_missing_field_uses_default(tmp_path: Path) -> None:
     del data["local_stt_unload_idle_ms"]
     config_file.write_text(json.dumps(data), encoding="utf-8")
     assert SettingsStore(path=config_file).load().local_stt_unload_idle_ms == 300_000
+
+
+# ---------------------------------------------------------------------------
+# local_stt_model_id validation (model-agnostic local STT)
+# ---------------------------------------------------------------------------
+
+
+def test_local_stt_model_default():
+    from open_voice_router.local_asr import registry
+
+    assert AppSettings.defaults().local_stt_model_id == registry.DEFAULT_MODEL_ID
+
+
+def test_local_stt_model_round_trip(tmp_path: Path) -> None:
+    from open_voice_router.local_asr import registry
+
+    config_file = tmp_path / "settings.json"
+    store = SettingsStore(path=config_file)
+    settings = AppSettings.defaults()
+    # Pick any non-default registered model.
+    other = next(m.id for m in registry.all_models() if m.id != registry.DEFAULT_MODEL_ID)
+    settings.local_stt_model_id = other
+    store.save(settings)
+    assert store.load().local_stt_model_id == other
+
+
+def test_local_stt_model_unknown_falls_back_to_default(tmp_path: Path) -> None:
+    from open_voice_router.local_asr import registry
+
+    config_file = tmp_path / "settings.json"
+    store = SettingsStore(path=config_file)
+    settings = AppSettings.defaults()
+    store.save(settings)
+    data = json.loads(config_file.read_text(encoding="utf-8"))
+    data["local_stt_model_id"] = "model-removed-from-registry"
+    config_file.write_text(json.dumps(data), encoding="utf-8")
+    assert store.load().local_stt_model_id == registry.DEFAULT_MODEL_ID
+
+
+def test_local_stt_model_missing_key_falls_back_to_default(tmp_path: Path) -> None:
+    from open_voice_router.local_asr import registry
+
+    config_file = tmp_path / "settings.json"
+    store = SettingsStore(path=config_file)
+    settings = AppSettings.defaults()
+    store.save(settings)
+    data = json.loads(config_file.read_text(encoding="utf-8"))
+    del data["local_stt_model_id"]
+    config_file.write_text(json.dumps(data), encoding="utf-8")
+    assert store.load().local_stt_model_id == registry.DEFAULT_MODEL_ID

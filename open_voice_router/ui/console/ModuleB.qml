@@ -247,6 +247,9 @@ Rectangle {
                     }
 
                     // ── LOCAL model dropdown ──────────────────────────
+                    // Driven by the backend model registry; selecting persists
+                    // the choice and retargets the sidecar (same backend slot
+                    // the Advanced panel's picker uses).
                     ComboBox {
                         id: localModelCombo
                         Layout.fillWidth: true
@@ -255,10 +258,33 @@ Rectangle {
                         // Greyed out when smart rotation is ON (local not available)
                         opacity: root.smartRotation ? 0.45 : 1.0
                         Behavior on opacity { NumberAnimation { duration: 150 } }
-                        // "Parakeet 0.6B" is the only local model for now;
-                        // future models will extend this list from the backend
-                        model: ["Parakeet 0.6B"]
-                        currentIndex: 0
+
+                        readonly property var catalog:
+                            (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                ? consoleViewModel.local_stt_models : []
+                        function selectedIndex() {
+                            if (typeof consoleViewModel === "undefined" || !consoleViewModel) return 0
+                            for (var i = 0; i < catalog.length; i++)
+                                if (catalog[i].id === consoleViewModel.local_stt_model_id) return i
+                            return 0
+                        }
+
+                        model: catalog.map(function(m) { return m.name })
+                        currentIndex: selectedIndex()
+                        onActivated: function(index) {
+                            if (typeof consoleViewModel !== "undefined" && consoleViewModel
+                                    && index >= 0 && index < catalog.length)
+                                consoleViewModel.save_local_stt_model(catalog[index].id)
+                        }
+                        // Keep in sync when the model is switched from the
+                        // Advanced panel (binding breaks after user interaction).
+                        Connections {
+                            target: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        ? consoleViewModel : null
+                            function onLocal_stt_model_changed() {
+                                localModelCombo.currentIndex = localModelCombo.selectedIndex()
+                            }
+                        }
 
                         background: Rectangle { radius: 6; color: theme.inputBg; border.color: theme.fill(0.1); border.width: 1 }
                         contentItem: RowLayout {
@@ -299,9 +325,34 @@ Rectangle {
                                 model: localModelCombo.count; currentIndex: localModelCombo.currentIndex
                                 delegate: ItemDelegate {
                                     width: ListView.view ? ListView.view.width : 0; height: 32
-                                    contentItem: Text { leftPadding: 10; text: localModelCombo.textAt(index); font.pixelSize: 11; font.weight: Font.DemiBold; color: theme.inputText; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight }
+                                    contentItem: RowLayout {
+                                        spacing: 6
+                                        // Installed marker: green = weights cached locally,
+                                        // hollow = will download on first load.
+                                        Rectangle {
+                                            Layout.leftMargin: 10
+                                            width: 6; height: 6; radius: 3
+                                            color: (localModelCombo.catalog[index] && localModelCombo.catalog[index].installed)
+                                                   ? "#10B981" : "transparent"
+                                            border.color: (localModelCombo.catalog[index] && localModelCombo.catalog[index].installed)
+                                                   ? "#10B981" : theme.ink(0.3)
+                                            border.width: 1
+                                        }
+                                        Text {
+                                            text: localModelCombo.textAt(index)
+                                            font.pixelSize: 11; font.weight: Font.DemiBold; color: theme.inputText
+                                            verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                        Text {
+                                            visible: !(localModelCombo.catalog[index] && localModelCombo.catalog[index].installed)
+                                            text: "↓"
+                                            rightPadding: 8
+                                            font.pixelSize: 10; color: theme.ink(0.4)
+                                        }
+                                    }
                                     background: Rectangle { radius: 4; color: index === localModelCombo.currentIndex ? Qt.rgba(1.0,0.365,0.118,0.15) : "transparent" }
-                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { localModelCombo.currentIndex = index; localModelCombo.popup.close() } }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { localModelCombo.currentIndex = index; localModelCombo.activated(index); localModelCombo.popup.close() } }
                                 }
                             }
                         }
@@ -533,7 +584,9 @@ Rectangle {
                                 MechanicalToggle {
                                     trackColor: theme.toggleTrack
                                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                    checked: root.smartRotation
+                                    // Controlled by the shared viewmodel — survives the click
+                                    // self-assign so it stays in sync with the advanced panel.
+                                    value: root.smartRotation
                                     onToggled: {
                                         if (typeof consoleViewModel !== "undefined" && consoleViewModel)
                                             consoleViewModel.set_stt_smart_rotation(checked)
@@ -706,12 +759,17 @@ Rectangle {
                 anchors.fill: parent; spacing: 0
                 Text {
                     text: {
-                        var s = (typeof consoleViewModel !== "undefined" && consoleViewModel)
-                                ? consoleViewModel.local_stt_status : "not_installed"
-                        return "MODEL: " + (s === "not_installed" ? "NONE" : "PARAKEET")
+                        var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                 ? consoleViewModel : null
+                        if (!vm || vm.local_stt_status === "not_installed")
+                            return "MODEL: NONE"
+                        // Short id of the selected registry model, e.g.
+                        // "PARAKEET-TDT-0.6B-V3" or "CANARY-180M-FLASH".
+                        return "MODEL: " + (vm.local_stt_model_id || "").toUpperCase()
                     }
                     font.family: "JetBrains Mono"; font.pixelSize: 8
                     color: theme.inkOnOuter(0.4); Layout.fillWidth: true
+                    elide: Text.ElideRight
                 }
                 Text { text: "TYPE: AUDIO-STT"; font.family: "JetBrains Mono"; font.pixelSize: 8; color: theme.inkOnOuter(0.4) }
             }

@@ -1,19 +1,24 @@
-"""LocalSTTManager — lifecycle manager for the vendored local ASR server.
+"""LocalSTTManager — lifecycle manager for the vendored local ASR sidecar.
 
-Architecture:
-  - The ASR server code (Groxaxo/Parakeet) is VENDORED inside the app at
-    open_voice_router/local_asr/server.py — no external download needed.
+Architecture (model-agnostic):
+  - The sidecar (HTTP layer + engine wrappers) is VENDORED inside the app at
+    open_voice_router/local_asr/ — no external download needed.
+  - Which model to serve comes from the model registry
+    (open_voice_router/local_asr/registry.py) — adding a model is one registry
+    entry; this manager reads everything (pip deps, cache layout, RAM hints)
+    from the selected ModelSpec.
   - The user only installs:
-      1. Python dependencies (flask, onnxruntime, onnx-asr, etc.) into a venv
-      2. The ONNX model files (~400 MB) — downloaded automatically by onnx_asr
-         on first server start from Hugging Face.
-  - The server runs on localhost:5092 and exposes an OpenAI-compatible endpoint.
+      1. Python dependencies (base HTTP deps + the selected engine's packages)
+         into a venv
+      2. The model files — downloaded automatically by the engine on first
+         server start from Hugging Face into the shared models dir.
+  - The server runs on localhost:5092 and exposes an OpenAI-compatible
+    endpoint; the model is selected via the MODEL_ID environment variable.
   - The existing STTClient generic adapter handles all HTTP — no new protocol code.
-  - The engine is swappable: swap server.py for any other ONNX-backed ASR server.
 
 Install location: <user_data_dir>/open-voice-router/local-stt/
   venv/       ← isolated Python environment with all ASR dependencies
-  models/     ← ONNX model files (auto-downloaded by onnx_asr on first start)
+  models/     ← model files (HF cache layout, shared by all engines)
 
 Signals (Qt main thread):
   install_progress(str)       — progress line during dep install
@@ -44,6 +49,8 @@ from PySide6.QtCore import (
     Slot,
 )
 
+from open_voice_router.local_asr import registry
+from open_voice_router.local_asr.registry import ModelSpec
 from open_voice_router.services.load_lifecycle import LoadLifecycle
 
 # ---------------------------------------------------------------------------
@@ -70,7 +77,8 @@ _SERVER_HOST = "127.0.0.1"
 _SERVER_URL = f"http://{_SERVER_HOST}:{_SERVER_PORT}"
 _HEALTH_ENDPOINT = f"{_SERVER_URL}/health"
 
-_MODEL_NAME = "parakeet-tdt-0.6b-v3"
+# Stable provider id. Historic value kept ("local-parakeet") so existing user
+# settings keep routing to the local sidecar regardless of the selected model.
 _PROVIDER_ID = "local-parakeet"
 
 
@@ -104,11 +112,17 @@ class _InstallSignals(QObject):
 
 
 class _InstallWorker(QRunnable):
-    """Installs Python deps into an isolated venv. Model is downloaded on first run."""
+    """Installs Python deps into an isolated venv. Model is downloaded on first run.
 
-    def __init__(self, signals: _InstallSignals) -> None:
+    Installs the base HTTP-layer requirements plus the SELECTED model's engine
+    packages (from its registry spec) — so choosing Parakeet never pulls in
+    faster-whisper and vice versa.
+    """
+
+    def __init__(self, signals: _InstallSignals, spec: ModelSpec) -> None:
         super().__init__()
         self.signals = signals
+        self._spec = spec
         self.setAutoDelete(True)
 
     def _emit(self, msg: str) -> None:
@@ -118,7 +132,9 @@ class _InstallWorker(QRunnable):
         try:
             self._install()
             self.signals.finished.emit(
-                True, "Local STT ready. Model will download on first start (~400 MB)."
+                True,
+                f"Local STT ready. {self._spec.display_name} downloads on "
+                "first start.",
             )
         except Exception as exc:
             self.signals.finished.emit(False, f"Install failed: {exc}")
@@ -144,14 +160,22 @@ class _InstallWorker(QRunnable):
         self._emit("Updating package manager…")
         self._pip(["install", "--upgrade", "pip", "-q"])
 
-        # 3. Install ASR server dependencies
-        self._emit("Installing ASR dependencies (onnxruntime, flask, onnx-asr…)")
-        self._emit("This may take 2–5 minutes on first install.")
+        # 3. Base HTTP-layer dependencies (flask, waitress, numpy, …)
+        self._emit("Installing server dependencies…")
         self._pip(["install", "-r", str(_LOCAL_ASR_REQ), "-q"])
+
+        # 4. Engine packages for the selected model
+        if self._spec.pip_requirements:
+            self._emit(
+                f"Installing {self._spec.engine} engine "
+                f"({', '.join(self._spec.pip_requirements)})…"
+            )
+            self._emit("This may take 2–5 minutes on first install.")
+            self._pip(["install", *self._spec.pip_requirements, "-q"])
 
         self._emit("Dependencies installed.")
         self._emit(
-            "The Parakeet model (~400 MB) downloads automatically on first start."
+            f"{self._spec.display_name} downloads automatically on first start."
         )
 
     def _pip(self, args: list[str]) -> None:
@@ -222,11 +246,17 @@ class LocalSTTManager(QObject):
     load_latency_measured = Signal(int)  # elapsed Load_Latency in milliseconds (R10.6)
 
     SERVER_URL = _SERVER_URL
-    MODEL_NAME = _MODEL_NAME
+    # Default model id — kept as a class attribute for backwards compatibility
+    # with callers that read MODEL_NAME; per-instance selection via set_model().
+    MODEL_NAME = registry.DEFAULT_MODEL_ID
     PROVIDER_ID = _PROVIDER_ID
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(
+        self, parent: QObject | None = None, model_id: str | None = None
+    ) -> None:
         super().__init__(parent)
+        # Selected model — resolved through the registry (unknown → default).
+        self._spec: ModelSpec = registry.get_model(model_id)
         self._process: subprocess.Popen | None = None
         self._health_poller: _HealthPoller | None = None
         self._log_handle = None  # open file object for server.log
@@ -308,6 +338,22 @@ class LocalSTTManager(QObject):
                         pass
             except Exception:
                 pass
+            finally:
+                # The touched pages are MAPPED-FILE pages: they sit in this
+                # process's working set (inflating Task Manager's number by up
+                # to the full model size) even though the goal is only to
+                # populate the OS standby cache. Trim our working set so the
+                # pages move to standby — still warm for the server subprocess,
+                # no longer charged to the app.
+                if sys.platform == "win32":
+                    try:
+                        import ctypes
+
+                        psapi = ctypes.windll.psapi
+                        kernel32 = ctypes.windll.kernel32
+                        psapi.EmptyWorkingSet(kernel32.GetCurrentProcess())
+                    except Exception:
+                        pass
 
         threading.Thread(target=_warm, daemon=True, name="stt-file-warmer").start()
 
@@ -342,9 +388,13 @@ class LocalSTTManager(QObject):
                 # BELOW_NORMAL_PRIORITY_CLASS — preempted by any foreground work.
                 kwargs["creationflags"] = 0x00004000
 
+            modules = self._spec.import_check_modules
+            if not modules:
+                return
+            import_stmt = "; ".join(f"import {m}" for m in modules)
             try:
                 subprocess.run(
-                    [str(_VENV_PYTHON), "-c", "import onnxruntime; import onnx_asr"],
+                    [str(_VENV_PYTHON), "-c", import_stmt],
                     **kwargs,
                 )
             except Exception:
@@ -355,6 +405,30 @@ class LocalSTTManager(QObject):
     # ------------------------------------------------------------------
     # Public queries
     # ------------------------------------------------------------------
+
+    @property
+    def model_id(self) -> str:
+        """The currently selected model's registry id."""
+        return self._spec.id
+
+    @property
+    def model_spec(self) -> ModelSpec:
+        return self._spec
+
+    @Slot(str)
+    def set_model(self, model_id: str) -> None:
+        """Select a different registry model.
+
+        If the server is running (or loading) with the old model it is stopped
+        — the next load() spawns it with the new MODEL_ID. Selecting the
+        already-active model is a no-op so callers can set unconditionally.
+        """
+        new_spec = registry.get_model(model_id)
+        if new_spec.id == self._spec.id:
+            return
+        self._spec = new_spec
+        if self.is_running() or self._status == "starting":
+            self.stop()
 
     def is_installed(self) -> bool:
         """True if the venv has the required packages installed."""
@@ -391,9 +465,12 @@ class LocalSTTManager(QObject):
 
     @Slot()
     def install(self) -> None:
-        """Install Python dependencies. Emits install_progress and install_finished."""
+        """Install Python dependencies for the selected model's engine.
+
+        Emits install_progress and install_finished. Re-running after a model
+        switch installs only the missing engine packages (pip is idempotent)."""
         self._set_status("installing")
-        worker = _InstallWorker(self._install_signals)
+        worker = _InstallWorker(self._install_signals, self._spec)
         QThreadPool.globalInstance().start(worker)
 
     @Slot(bool, str)
@@ -516,6 +593,7 @@ class LocalSTTManager(QObject):
         self._set_status("starting")
 
         env = os.environ.copy()
+        env["MODEL_ID"] = self._spec.id
         env["MODELS_DIR"] = str(_MODELS_DIR)
         env["TEMP_DIR"] = str(_DATA_DIR / "temp_uploads")
         env["PORT"] = str(_SERVER_PORT)
@@ -573,22 +651,41 @@ class LocalSTTManager(QObject):
         poller.start()
         return None
 
-    def _model_cache_present(self) -> bool:
-        """True if the local ONNX model snapshot is present in the models dir.
+    @staticmethod
+    def _cache_present_for(spec: ModelSpec) -> bool:
+        """True if *spec*'s model snapshot is present in the models dir.
 
-        ``onnx_asr.load_model`` resolves the model from the HuggingFace snapshot
-        cached under ``MODELS_DIR``; presence is indicated by at least one ``.onnx``
-        weight file anywhere in that tree. Used to fail Model_Load fast with
-        ``missing-cache`` instead of triggering a network download (R10.4).
+        Engines resolve models from the HuggingFace-style cache under
+        ``MODELS_DIR``. Presence means: some directory whose name contains the
+        spec's ``cache_dir_fragment`` holds at least one file matching its
+        ``cache_weight_glob``. Per-model detection matters now that several
+        models can coexist in the cache — a cached Parakeet must not make a
+        newly selected Whisper look installed.
         """
         try:
             if not _MODELS_DIR.exists():
                 return False
-            for _ in _MODELS_DIR.rglob("*.onnx"):
-                return True
+            fragment = spec.cache_dir_fragment.lower()
+            for directory in _MODELS_DIR.rglob("*"):
+                if not directory.is_dir():
+                    continue
+                if fragment and fragment not in directory.name.lower():
+                    continue
+                for _ in directory.rglob(spec.cache_weight_glob):
+                    return True
             return False
         except Exception:
             return False
+
+    def is_model_cached(self, model_id: str) -> bool:
+        """True if *model_id*'s weights are downloaded (regardless of selection)."""
+        return self._cache_present_for(registry.get_model(model_id))
+
+    def _model_cache_present(self) -> bool:
+        """True if the SELECTED model's snapshot is present. Used to fail
+        Model_Load fast with ``missing-cache`` instead of triggering a network
+        download (R10.4)."""
+        return self._cache_present_for(self._spec)
 
     @Slot()
     def stop(self) -> None:

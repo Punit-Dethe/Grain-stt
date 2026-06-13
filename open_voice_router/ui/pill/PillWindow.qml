@@ -1,11 +1,14 @@
 // PillWindow.qml — Dot-grid pill, ported from reference pill.html design
 // Key improvements: proper noise gate, power curve, multiple grey shades,
 // hot/active/dim cell tiers, flicker, isolated mic-to-display pipeline.
+// NOTE: deliberately NO QtQuick.Controls import — the pill is the only
+// PERMANENT QML window, and it uses zero Controls types. Importing Controls
+// here would keep the whole Controls plugin stack resident for the app's
+// entire lifetime (~4+ MB measured). Plain Window has everything we need.
 import QtQuick
-import QtQuick.Controls.Basic
 import QtQuick.Window
 
-ApplicationWindow {
+Window {
     id: root
 
     flags: Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint

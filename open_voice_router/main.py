@@ -51,6 +51,8 @@ _FONTS_DIR = _PKG_DIR / "assets" / "fonts"
 _ICON_PATH = _PKG_DIR / "assets" / "grain.ico"
 _PILL_QML = _UI_DIR / "pill" / "PillWindow.qml"
 _CONSOLE_QML = _UI_DIR / "console" / "ConsoleWindow.qml"
+_ASSIST_PALETTE_QML = _UI_DIR / "assist" / "AssistPalette.qml"
+_ASSIST_PANEL_QML = _UI_DIR / "assist" / "AssistPanel.qml"
 
 
 def _load_bundled_fonts() -> None:
@@ -117,13 +119,27 @@ def _ensure_local_provider_registered(
     Idempotent: if the provider is already present, returns settings unchanged.
     """
     pid = LocalSTTManager.PROVIDER_ID
-    if any(p.id == pid for p in settings.stt_providers):
-        return settings
+    spec = manager.model_spec
+    existing = next((p for p in settings.stt_providers if p.id == pid), None)
+    if existing is not None:
+        # Keep the registered provider in sync with the selected registry
+        # model (the user may have switched models since registration).
+        if existing.model == spec.id and existing.name == f"Local ({spec.display_name})":
+            return settings
+        updated_provider = dataclasses.replace(
+            existing, model=spec.id, name=f"Local ({spec.display_name})"
+        )
+        providers = [
+            updated_provider if p.id == pid else p for p in settings.stt_providers
+        ]
+        updated = dataclasses.replace(settings, stt_providers=providers)
+        settings_store.save(updated)
+        return updated
     provider = ProviderConfig(
         id=pid,
-        name="Local (Parakeet)",
+        name=f"Local ({spec.display_name})",
         base_url=LocalSTTManager.SERVER_URL,
-        model=LocalSTTManager.MODEL_NAME,
+        model=spec.id,
         quota_limit=None,
         quota_used_today=0,
     )
@@ -169,6 +185,13 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 2. Instantiate infrastructure
     # ------------------------------------------------------------------
+    # Launch on Boot self-heal: rewrite (or clear) the Run registry entry on
+    # every start so it always points at THIS executable — a moved/renamed
+    # install or an upgrade can never leave a stale entry behind.
+    from open_voice_router.startup_registry import reconcile_launch_on_boot
+
+    reconcile_launch_on_boot(settings.launch_on_boot)
+
     credential_store = CredentialStore()
 
     # Ensure log directory exists
@@ -192,7 +215,7 @@ def main() -> None:
     # the UI closed). Shared by the settings UI and the session controller so
     # both drive the same process (single-process invariant — R8.5).
     # ------------------------------------------------------------------
-    local_stt_manager = LocalSTTManager()
+    local_stt_manager = LocalSTTManager(model_id=settings.local_stt_model_id)
 
     # Register the local provider at startup if installed, so the hotkey works
     # with the UI never opened (registration is no longer gated on the settings
@@ -250,6 +273,73 @@ def main() -> None:
         _qml_err = f"[ERROR] Failed to load Pill QML from {_PILL_QML}\n"
         print(_qml_err, file=sys.stderr)
         _write_qml_error(_qml_err)
+    else:
+        # The pill loads exactly once — release the QML compilation caches
+        # its engine no longer needs (the instantiated tree keeps working).
+        engine.trimComponentCache()
+        engine.collectGarbage()
+
+    # ------------------------------------------------------------------
+    # 7b. Grain Assist — decoupled agent workflow (own controller + engine,
+    # same isolation model as the pill; the console window is never involved).
+    #
+    # The QML engine is LAZY: created on the first summon, destroyed after
+    # dismissal (same dispose-and-trim pattern as the console window), so the
+    # idle app pays no RAM for assist beyond the lightweight controller.
+    # ------------------------------------------------------------------
+    from open_voice_router.assist_controller import AssistController
+
+    assist_controller = AssistController(
+        settings=settings,
+        credential_store=credential_store,
+        llm_client=llm_client,
+        clipboard_service=clipboard_service,
+        # Voice input: a dedicated AudioService (so it never races the dictation
+        # capture), the shared stateless STTClient, and the SHARED LocalSTTManager
+        # (single-process invariant — both paths must drive the same server).
+        audio_service=AudioService(),
+        stt_client=stt_client,
+        local_stt_manager=local_stt_manager,
+    )
+    _assist_engine: QQmlApplicationEngine | None = None
+
+    def _ensure_assist_ui() -> None:
+        nonlocal _assist_engine
+        if _assist_engine is not None:
+            return
+        _assist_engine = QQmlApplicationEngine()
+        _assist_engine.rootContext().setContextProperty(
+            "assistViewModel", assist_controller
+        )
+        _assist_engine.load(QUrl.fromLocalFile(str(_ASSIST_PALETTE_QML)))
+        _assist_engine.load(QUrl.fromLocalFile(str(_ASSIST_PANEL_QML)))
+        roots = _assist_engine.rootObjects()
+        if len(roots) >= 2:
+            assist_controller.attach_windows(roots[0], roots[1])
+        else:
+            _qml_err = "[ERROR] Failed to load Grain Assist QML windows\n"
+            print(_qml_err, file=sys.stderr)
+            _write_qml_error(_qml_err)
+            _assist_engine = None
+
+    def _release_assist_ui() -> None:
+        nonlocal _assist_engine
+        if _assist_engine is None:
+            return
+        doomed = _assist_engine
+        _assist_engine = None
+        try:
+            doomed.clearComponentCache()
+        except Exception:
+            pass
+        try:
+            doomed.deleteLater()
+        except Exception:
+            pass
+        # Trim AFTER the deferred delete has been processed (next-next tick).
+        QTimer.singleShot(0, lambda: QTimer.singleShot(0, _trim_working_set))
+
+    assist_controller.set_ui_hooks(_ensure_assist_ui, _release_assist_ui)
 
     # The console window gets its own isolated engine created on demand.
     # All QML types it loads (ModuleA/B/C, panels, etc.) live inside that
@@ -394,6 +484,11 @@ def main() -> None:
     settings_vm.settings_changed.connect(
         lambda: controller.update_settings(settings_vm._settings)
     )
+    # Grain Assist follows the same live-settings stream (hotkey rebinds,
+    # provider changes take effect on the next summon).
+    settings_vm.settings_changed.connect(
+        lambda: assist_controller.update_settings(settings_vm._settings)
+    )
 
     # Wire history signals → SettingsViewModel so UI + tray stay in sync
     controller.transcription_result_ready.connect(settings_vm.add_transcription_entry)
@@ -488,6 +583,11 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 14. Run the event loop
     # ------------------------------------------------------------------
+    # One-shot working-set trim once startup has settled: import-time and
+    # QML-compilation transients are released back to the OS so the idle
+    # footprint monitoring tools report reflects what the app actually holds.
+    QTimer.singleShot(8000, _trim_working_set)
+
     sys.exit(app.exec())
 
 

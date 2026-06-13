@@ -20,7 +20,7 @@ Design (cursor model — the robust fix for "the last few seconds get cut off"):
 
 Signals:
   amplitude_changed(float)     — 0.0–1.0 RMS, for waveform display
-  chunk_ready(bytes)           — finalized WAV chunk ready for STT
+  chunk_ready(AudioChunk)      — finalized, time-tagged WAV chunk ready for STT
   recording_stopped()          — user stopped; final tail already emitted first
 """
 
@@ -29,6 +29,7 @@ from __future__ import annotations
 import io
 import threading
 import wave
+from dataclasses import dataclass, field
 
 import numpy as np
 import sounddevice as sd
@@ -38,6 +39,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from open_voice_router.exceptions import AudioDeviceError
 from open_voice_router.services.audio import SAMPLE_RATE, CHANNELS, DTYPE, BLOCKSIZE
+from open_voice_router.services.audio_conditioner import AudioConditioner, normalize_chunk
 
 # ---------------------------------------------------------------------------
 # Chunking configuration (all tunable)
@@ -55,6 +57,29 @@ _OVERLAP_FRAMES = int(OVERLAP_SECONDS * _FRAMES_PER_SECOND)
 _SILENCE_FRAMES = int(SILENCE_MIN_DURATION * _FRAMES_PER_SECOND)
 _EARLY_MIN_FRAMES = int(10.0 * _FRAMES_PER_SECOND)  # >=10s unsent before early finalize
 _EARLY_GUARD_FRAMES = int(3.0 * _FRAMES_PER_SECOND)  # >=3s unsent absolute floor
+
+
+@dataclass
+class AudioChunk:
+    """A finalized chunk of session audio, tagged with its ABSOLUTE position
+    on the session timeline (seconds since recording started).
+
+    The timeline is ground truth from our own frame counter — it never depends
+    on any model's timestamps. ``fresh_start_sec`` is the send-cursor position
+    when the chunk was cut: everything before it is overlap context that a
+    previous chunk already covered; everything from it to ``end_sec`` is new
+    audio that ONLY this chunk carries.
+    """
+
+    wav_bytes: bytes
+    start_sec: float        # chunk audio begins here (includes overlap context)
+    fresh_start_sec: float  # new (not-previously-sent) audio begins here
+    end_sec: float          # chunk audio ends here
+    attempts: int = field(default=0, compare=False)  # transcription attempts made
+
+    @property
+    def fresh_duration_sec(self) -> float:
+        return max(0.0, self.end_sec - self.fresh_start_sec)
 
 
 def _pcm_to_wav(pcm_frames: list[np.ndarray]) -> bytes:
@@ -78,11 +103,11 @@ class ChunkedAudioService(QObject):
     """
 
     amplitude_changed = Signal(float)   # waveform display
-    chunk_ready = Signal(bytes)         # finalized WAV chunk
+    chunk_ready = Signal(object)        # finalized AudioChunk
     recording_stopped = Signal()        # user pressed stop
 
     _amplitude_ready = Signal(float)
-    _chunk_ready_internal = Signal(bytes)
+    _chunk_ready_internal = Signal(object)
     _stopped_internal = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -103,6 +128,12 @@ class ChunkedAudioService(QObject):
 
         self._smoothed_amplitude: float = 0.0
 
+        # Voice processing (Process Audio toggle): 85 Hz high-pass per block
+        # + noise-gated AGC per chunk. Timing-exact — never changes frame
+        # counts, so the absolute cursor timeline is unaffected.
+        self._conditioning_enabled: bool = True
+        self._conditioner = AudioConditioner(sample_rate=SAMPLE_RATE)
+
         self._amplitude_ready.connect(self.amplitude_changed, Qt.ConnectionType.QueuedConnection)
         self._chunk_ready_internal.connect(self.chunk_ready, Qt.ConnectionType.QueuedConnection)
         self._stopped_internal.connect(self.recording_stopped, Qt.ConnectionType.QueuedConnection)
@@ -110,6 +141,14 @@ class ChunkedAudioService(QObject):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def set_conditioning(self, enabled: bool) -> None:
+        """Enable/disable voice processing for the NEXT session.
+
+        Called by AppController from the persisted Process Audio setting
+        before each session starts — never mid-recording.
+        """
+        self._conditioning_enabled = bool(enabled)
 
     def reset(self) -> None:
         """Clear all state so a new session starts completely fresh."""
@@ -119,6 +158,7 @@ class ChunkedAudioService(QObject):
             self._sent_frames = 0
             self._silence_frames = 0
         self._smoothed_amplitude = 0.0
+        self._conditioner.reset()
 
     def start(self, device_id: int | None) -> None:
         """Begin continuous recording from a clean slate."""
@@ -129,6 +169,7 @@ class ChunkedAudioService(QObject):
             self._sent_frames = 0
             self._silence_frames = 0
         self._smoothed_amplitude = 0.0
+        self._conditioner.reset()
 
         try:
             self._stream = sd.InputStream(
@@ -174,12 +215,25 @@ class ChunkedAudioService(QObject):
         # 4. Flush the trailing audio (everything past the cursor, plus overlap).
         with self._lock:
             start_frame = max(0, self._sent_frames - _OVERLAP_FRAMES)
-            tail = self._slice_frames_locked(start_frame, self._total_frames)
+            fresh_start_frame = self._sent_frames
+            end_frame = self._total_frames
+            tail = self._slice_frames_locked(start_frame, end_frame)
             # Cursor now covers the whole session — nothing left unsent.
             self._sent_frames = self._total_frames
 
         if tail:
-            self._chunk_ready_internal.emit(_pcm_to_wav(tail))
+            # Voice processing stage 2: noise-gated AGC on the outgoing chunk
+            # (returns new arrays; the master session buffer is never touched).
+            if self._conditioning_enabled:
+                tail = normalize_chunk(tail)
+            self._chunk_ready_internal.emit(
+                AudioChunk(
+                    wav_bytes=_pcm_to_wav(tail),
+                    start_sec=start_frame / _FRAMES_PER_SECOND,
+                    fresh_start_sec=fresh_start_frame / _FRAMES_PER_SECOND,
+                    end_sec=end_frame / _FRAMES_PER_SECOND,
+                )
+            )
 
         # 5. Signal completion AFTER the final chunk (ordered queued delivery).
         self._stopped_internal.emit()
@@ -211,6 +265,12 @@ class ChunkedAudioService(QObject):
         status: sd.CallbackFlags,
     ) -> None:
         block = indata.copy()  # copy before sounddevice reuses the buffer
+
+        # Voice processing stage 1: high-pass before ANY downstream use, so
+        # both the stored audio and the silence-detection RMS see a signal
+        # free of sub-vocal rumble (which otherwise masks real silences).
+        if self._conditioning_enabled:
+            block = self._conditioner.process_block(block)
 
         samples_f = block.astype(np.float32) / 32768.0
         raw_rms = float(np.sqrt(np.mean(samples_f ** 2)))
@@ -262,10 +322,20 @@ class ChunkedAudioService(QObject):
         if end <= self._sent_frames:
             return
         start_frame = max(0, self._sent_frames - _OVERLAP_FRAMES)
+        fresh_start_frame = self._sent_frames
         chunk = self._slice_frames_locked(start_frame, end)
         if not chunk:
             return
-        self._chunk_ready_internal.emit(_pcm_to_wav(chunk))
+        if self._conditioning_enabled:
+            chunk = normalize_chunk(chunk)
+        self._chunk_ready_internal.emit(
+            AudioChunk(
+                wav_bytes=_pcm_to_wav(chunk),
+                start_sec=start_frame / _FRAMES_PER_SECOND,
+                fresh_start_sec=fresh_start_frame / _FRAMES_PER_SECOND,
+                end_sec=end / _FRAMES_PER_SECOND,
+            )
+        )
         # Advance the cursor to the end of what we just sent.
         self._sent_frames = end
         self._silence_frames = 0

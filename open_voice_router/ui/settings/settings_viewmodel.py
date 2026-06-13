@@ -15,6 +15,7 @@ from typing import Any
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
 from open_voice_router.exceptions import KeychainError
+from open_voice_router.local_asr import registry as model_registry
 from open_voice_router.models import (
     PROVIDER_PRESETS,
     AppSettings,
@@ -105,6 +106,7 @@ class SettingsViewModel(QObject):
     stt_smart_rotation_changed = Signal(bool)
     stt_local_enabled_changed = Signal(bool)
     llm_smart_rotation_changed = Signal(bool)
+    grain_assist_provider_changed = Signal(str)
     llm_error_message_changed = Signal(str)
     ui_dark_mode_changed = Signal(bool)
 
@@ -114,6 +116,10 @@ class SettingsViewModel(QObject):
     local_stt_install_progress = Signal(str)
     local_stt_install_finished = Signal(bool, str)
     local_stt_unload_idle_changed = Signal(int)
+    local_stt_model_changed = Signal(str)
+    # Fired when the model catalog's volatile bits (installed flags) may have
+    # changed — after installs, status transitions, or a model switch.
+    local_stt_models_changed = Signal()
 
     def __init__(
         self,
@@ -165,6 +171,11 @@ class SettingsViewModel(QObject):
         # instance is created when none is injected (e.g. in unit tests).
         self._local_stt = local_stt_manager or LocalSTTManager()
         self._local_stt.status_changed.connect(self.local_stt_status_changed)
+        # Installed flags can flip on any status transition (install finished,
+        # first load completed a download, uninstall) — refresh the catalog.
+        self._local_stt.status_changed.connect(
+            lambda _s: self.local_stt_models_changed.emit()
+        )
         self._local_stt.install_progress.connect(self.local_stt_install_progress)
         self._local_stt.install_finished.connect(self._on_local_stt_install_finished)
         self._local_stt.server_ready.connect(self._on_local_stt_server_ready)
@@ -268,11 +279,17 @@ class SettingsViewModel(QObject):
             local_stt_unload_idle_ms=overrides.get(
                 "local_stt_unload_idle_ms", self._settings.local_stt_unload_idle_ms
             ),
+            local_stt_model_id=overrides.get(
+                "local_stt_model_id", self._settings.local_stt_model_id
+            ),
             stt_smart_rotation=overrides.get(
                 "stt_smart_rotation", self._settings.stt_smart_rotation
             ),
             llm_smart_rotation=overrides.get(
                 "llm_smart_rotation", self._settings.llm_smart_rotation
+            ),
+            grain_assist_provider_id=overrides.get(
+                "grain_assist_provider_id", self._settings.grain_assist_provider_id
             ),
             ui_dark_mode=overrides.get(
                 "ui_dark_mode", self._settings.ui_dark_mode
@@ -810,6 +827,58 @@ class SettingsViewModel(QObject):
         self.local_stt_unload_idle_changed.emit(int(value))
         self.settings_changed.emit()
 
+    @Property("QVariantList", notify=local_stt_models_changed)
+    def local_stt_models(self) -> list:
+        """The model catalog from the registry, for the model pickers.
+
+        ``installed`` reflects whether the model's weights are already in the
+        local cache (a model can be selected without being downloaded yet —
+        it downloads on its first load).
+        """
+        engine_ready = self._local_stt.is_installed()
+        return [
+            {
+                "id": m.id,
+                "name": m.display_name,
+                "engine": m.engine,
+                "ramMb": m.ram_estimate_mb,
+                "languages": m.languages,
+                "description": m.description,
+                "wer": m.wer_hint,
+                "wordTimestamps": m.supports_word_timestamps,
+                "installed": engine_ready and self._local_stt.is_model_cached(m.id),
+            }
+            for m in model_registry.all_models()
+        ]
+
+    @Property(str, notify=local_stt_model_changed)
+    def local_stt_model_id(self) -> str:
+        return self._settings.local_stt_model_id
+
+    @Slot(str)
+    def save_local_stt_model(self, model_id: str) -> None:
+        """Select a different local STT model.
+
+        Persists the choice, points the manager at the new model (stopping a
+        running server so the next session loads the right one), installs any
+        missing engine packages, and keeps the registered provider entry in
+        sync so the pill/router immediately reflect the new model.
+        """
+        spec = model_registry.get_model(model_id)
+        if spec.id == self._settings.local_stt_model_id:
+            return
+        self._settings = self._updated_settings(local_stt_model_id=spec.id)
+        self._settings_store.save(self._settings)
+        self._local_stt.set_model(spec.id)
+        self._sync_local_provider_entry()
+        # Engine packages for the new model may not be in the venv yet; the
+        # install is idempotent and a no-op when everything is present.
+        if self._local_stt.is_installed():
+            self._local_stt.install()
+        self.local_stt_model_changed.emit(spec.id)
+        self.local_stt_models_changed.emit()
+        self.settings_changed.emit()
+
     @Slot()
     def install_local_stt(self) -> None:
         """Start one-click install of the Groxaxo server + dependencies."""
@@ -878,21 +947,46 @@ class SettingsViewModel(QObject):
         return
 
     def _register_local_stt_provider(self) -> None:
-        """Add Local Parakeet as an STT provider if not already present."""
+        """Add the local STT provider if not already present (kept in sync
+        with the selected registry model)."""
         pid = LocalSTTManager.PROVIDER_ID
         if any(p.id == pid for p in self._settings.stt_providers):
+            self._sync_local_provider_entry()
             return
+        spec = self._local_stt.model_spec
         provider = ProviderConfig(
             id=pid,
-            name="Local (Parakeet)",
+            name=f"Local ({spec.display_name})",
             base_url=LocalSTTManager.SERVER_URL,
-            model=LocalSTTManager.MODEL_NAME,
+            model=spec.id,
             quota_limit=None,
             quota_used_today=0,
         )
         self._settings = self._updated_settings(
             stt_providers=[provider] + list(self._settings.stt_providers)
         )
+        self._settings_store.save(self._settings)
+        self._refresh_provider_lists()
+        self.settings_changed.emit()
+
+    def _sync_local_provider_entry(self) -> None:
+        """Update the registered local provider's name/model after a model
+        switch. No-op when absent or already in sync."""
+        pid = LocalSTTManager.PROVIDER_ID
+        spec = self._local_stt.model_spec
+        existing = next(
+            (p for p in self._settings.stt_providers if p.id == pid), None
+        )
+        if existing is None:
+            return
+        wanted_name = f"Local ({spec.display_name})"
+        if existing.model == spec.id and existing.name == wanted_name:
+            return
+        updated = dataclasses.replace(existing, model=spec.id, name=wanted_name)
+        providers = [
+            updated if p.id == pid else p for p in self._settings.stt_providers
+        ]
+        self._settings = self._updated_settings(stt_providers=providers)
         self._settings_store.save(self._settings)
         self._refresh_provider_lists()
         self.settings_changed.emit()
@@ -1216,6 +1310,31 @@ class SettingsViewModel(QObject):
         self._settings = self._updated_settings(llm_providers=new_providers)
         self._settings_store.save(self._settings)
         self._refresh_provider_lists()
+        self.settings_changed.emit()
+
+    # ------------------------------------------------------------------
+    # grain_assist_provider_id — which LLM the Grain Assist agent uses
+    # ------------------------------------------------------------------
+
+    @Property(str, notify=grain_assist_provider_changed)
+    def grain_assist_provider_id(self) -> str:
+        """The provider id Grain Assist uses ("" = auto / first enabled)."""
+        return self._settings.grain_assist_provider_id
+
+    @Slot(str)
+    def save_grain_assist_provider(self, provider_id: str) -> None:
+        """Persist the Grain Assist provider choice (independent of rotation).
+
+        An empty string means "auto" — let the agent fall back to the first
+        enabled provider. A non-empty id is honoured even if that provider is
+        disabled for processing rotation.
+        """
+        pid = provider_id or ""
+        if pid == self._settings.grain_assist_provider_id:
+            return
+        self._settings = self._updated_settings(grain_assist_provider_id=pid)
+        self._settings_store.save(self._settings)
+        self.grain_assist_provider_changed.emit(pid)
         self.settings_changed.emit()
 
     # ------------------------------------------------------------------

@@ -39,10 +39,12 @@ Rectangle {
         return names
     }
 
-    // Smart Rotation — managed imperatively (MechanicalToggle.onClicked does
-    // root.checked = !root.checked internally, so any QML binding on `checked`
-    // breaks on first user click; use explicit Connections assignments instead).
-    property bool smartRotation: false
+    // Smart Rotation — reactive binding to the shared viewmodel, so this quick
+    // panel and the advanced panel always agree (toggling in one updates both).
+    // The toggle itself uses MechanicalToggle controlled `value:` mode, which
+    // survives the click self-assign — no imperative .checked juggling needed.
+    property bool smartRotation: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                  ? consoleViewModel.llm_smart_rotation : false
 
     radius: 22
     color: theme.cardOuter
@@ -69,12 +71,6 @@ Rectangle {
             llmCombo.currentIndex = idx
             // Sync processing history (QVariantList bindings are unreliable)
             pHistoryBox._data = (vm.processing_history || []).slice().reverse()
-        }
-
-        // Explicit handler — MechanicalToggle breaks checked: binding on first click
-        function onLlm_smart_rotation_changed(val) {
-            root.smartRotation = val
-            _llmSmartRotToggle.checked = val
         }
 
         function onProcessing_history_changed() {
@@ -343,10 +339,9 @@ Rectangle {
                     Component.onCompleted: {
                         var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
                         if (!vm) return
-                        // Init smart rotation state imperatively
-                        root.smartRotation = vm.llm_smart_rotation
-                        _llmSmartRotToggle.checked = vm.llm_smart_rotation
-                        // Pre-select the enabled provider
+                        // Pre-select the enabled provider (smart-rotation state is
+                        // handled reactively by the root.smartRotation binding + the
+                        // toggle's value: binding — no imperative init needed).
                         var ps = vm.llm_providers
                         for (var i = 0; i < ps.length; i++) {
                             if (ps[i].enabled === true) { llmCombo.currentIndex = i; break }
@@ -529,9 +524,10 @@ Rectangle {
                                 id: _llmSmartRotToggle
                                 trackColor: theme.toggleTrack
                                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                // checked is NOT bound declaratively — MechanicalToggle breaks QML
-                                // bindings by self-assigning inside onClicked. Managed via
-                                // Component.onCompleted + Connections.onLlm_smart_rotation_changed.
+                                // Controlled by the shared viewmodel — stays in sync with
+                                // the advanced panel's toggle automatically.
+                                value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        ? consoleViewModel.llm_smart_rotation : false
                                 onToggled: {
                                     var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
                                     if (vm) vm.set_llm_smart_rotation(checked)

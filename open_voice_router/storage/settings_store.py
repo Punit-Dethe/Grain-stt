@@ -15,6 +15,7 @@ from typing import Any
 
 import platformdirs
 
+from open_voice_router.local_asr import registry as _model_registry
 from open_voice_router.models import (
     AppSettings,
     DEFAULT_SYSTEM_PROMPT,
@@ -80,6 +81,18 @@ def _validate_unload_idle(value: Any) -> int:
     if value not in _UNLOAD_IDLE_ALLOWED_MS:
         return _UNLOAD_IDLE_DEFAULT_MS
     return value
+
+
+def _validate_local_model_id(value: Any) -> str:
+    """Validate the selected local STT model id against the model registry.
+
+    Unknown, missing, or non-string values fall back to the registry default
+    so a settings file written by a newer/older app version still loads into
+    a working configuration.
+    """
+    if isinstance(value, str) and _model_registry.is_known_model(value):
+        return value
+    return _model_registry.DEFAULT_MODEL_ID
 
 
 def _provider_config_from_dict(d: dict[str, Any]) -> ProviderConfig:
@@ -168,8 +181,10 @@ def _app_settings_from_dict(d: dict[str, Any]) -> AppSettings:
         local_stt_unload_idle_ms=_validate_unload_idle(
             d.get("local_stt_unload_idle_ms", _UNLOAD_IDLE_DEFAULT_MS)
         ),
+        local_stt_model_id=_validate_local_model_id(d.get("local_stt_model_id")),
         stt_smart_rotation=bool(d.get("stt_smart_rotation", False)),
         llm_smart_rotation=bool(d.get("llm_smart_rotation", False)),
+        grain_assist_provider_id=str(d.get("grain_assist_provider_id", "")),
         ui_dark_mode=bool(d.get("ui_dark_mode", False)),
         transcription_history=[
             e for e in d.get("transcription_history", [])

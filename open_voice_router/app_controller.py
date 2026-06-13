@@ -18,18 +18,19 @@ from enum import Enum, auto
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 
-from open_voice_router.exceptions import AudioDeviceError, ProviderError
+from open_voice_router.exceptions import AudioDeviceError, ProviderError, RateLimitError
 from open_voice_router.logger import FallbackLogEntry, Logger
 from open_voice_router.models import AppSettings, FallbackRecord, SessionLogEntry
 from open_voice_router.router import ProviderPool, Router
+from open_voice_router.services.llm_rotation import RotationTracker, estimate_tokens
 from open_voice_router.services.audio import AudioService
-from open_voice_router.services.chunked_audio import ChunkedAudioService
+from open_voice_router.services.chunked_audio import AudioChunk, ChunkedAudioService
 from open_voice_router.services.clipboard import ClipboardService
 from open_voice_router.services.hotkey import HotkeyService
 from open_voice_router.services.llm_client import LLMClient
 from open_voice_router.services.local_stt_manager import LocalSTTManager
 from open_voice_router.services.stt_client import STTClient
-from open_voice_router.services.transcript_merger import merge_transcript
+from open_voice_router.services.transcript_merger import TimelineAssembler
 from open_voice_router.services.volume_meter import VolumeMeterService
 from open_voice_router.storage.credential_store import CredentialStore
 from open_voice_router.storage.settings_store import SettingsStore
@@ -71,12 +72,15 @@ class _WorkerSignals(QObject):
 
     stt_complete = Signal(str)  # transcript
     stt_error = Signal(str)  # error message
-    llm_complete = Signal(str)  # response text
-    llm_error = Signal(str)  # error message
+    llm_complete = Signal(object)  # LLMResult (text + usage/limit signals)
+    llm_error = Signal(str)  # error message (non-429 failures)
+    llm_rate_limited = Signal(str, float)  # (provider_id, retry_after_s)
     # Streaming chunk results carry the session generation so the controller can
-    # ignore stale responses from a previous/discarded session.
-    chunk_stt_complete = Signal(int, str)  # (generation, transcript)
-    chunk_stt_error = Signal(int, str)  # (generation, error)
+    # ignore stale responses from a previous/discarded session, plus the
+    # AudioChunk itself so the controller knows WHICH time range the result
+    # covers (and can retry the exact chunk on failure).
+    chunk_stt_complete = Signal(int, object, object)  # (generation, AudioChunk, TranscriptionResult)
+    chunk_stt_error = Signal(int, object, str)  # (generation, AudioChunk, error)
 
 
 # ---------------------------------------------------------------------------
@@ -105,10 +109,10 @@ class _STTWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            transcript = asyncio.run(
+            result = asyncio.run(
                 self._stt_client.transcribe(self._provider, self._audio, self._api_key)
             )
-            self.signals.stt_complete.emit(transcript)
+            self.signals.stt_complete.emit(result.text)
         except Exception as exc:  # noqa: BLE001
             self.signals.stt_error.emit(str(exc))
 
@@ -116,8 +120,9 @@ class _STTWorker(QRunnable):
 class _ChunkSTTWorker(QRunnable):
     """Transcribes a single audio chunk in streaming mode.
 
-    Emits chunk_stt_complete(generation, transcript) or chunk_stt_error(generation, error).
-    The generation token lets the controller correlate/ignore stale responses.
+    Emits chunk_stt_complete(generation, chunk, result) or
+    chunk_stt_error(generation, chunk, error). The generation token lets the
+    controller ignore stale responses; the chunk identifies the time range.
     """
 
     def __init__(
@@ -125,7 +130,7 @@ class _ChunkSTTWorker(QRunnable):
         generation: int,
         stt_client: STTClient,
         provider,
-        audio: bytes,
+        chunk: AudioChunk,
         api_key: str | None,
         signals: _WorkerSignals,
     ) -> None:
@@ -133,19 +138,21 @@ class _ChunkSTTWorker(QRunnable):
         self._generation = generation
         self._stt_client = stt_client
         self._provider = provider
-        self._audio = audio
+        self._chunk = chunk
         self._api_key = api_key
         self.signals = signals
         self.setAutoDelete(True)
 
     def run(self) -> None:
         try:
-            transcript = asyncio.run(
-                self._stt_client.transcribe(self._provider, self._audio, self._api_key)
+            result = asyncio.run(
+                self._stt_client.transcribe(
+                    self._provider, self._chunk.wav_bytes, self._api_key
+                )
             )
-            self.signals.chunk_stt_complete.emit(self._generation, transcript)
+            self.signals.chunk_stt_complete.emit(self._generation, self._chunk, result)
         except Exception as exc:  # noqa: BLE001
-            self.signals.chunk_stt_error.emit(self._generation, str(exc))
+            self.signals.chunk_stt_error.emit(self._generation, self._chunk, str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -176,15 +183,17 @@ class _LLMWorker(QRunnable):
 
     def run(self) -> None:
         try:
-            response = asyncio.run(
-                self._llm_client.complete(
+            result = asyncio.run(
+                self._llm_client.complete_detailed(
                     self._provider,
                     self._transcript,
                     self._api_key,
                     system_prompt=self._system_prompt,
                 )
             )
-            self.signals.llm_complete.emit(response)
+            self.signals.llm_complete.emit(result)
+        except RateLimitError as exc:
+            self.signals.llm_rate_limited.emit(self._provider.id, exc.retry_after_s)
         except Exception as exc:  # noqa: BLE001
             self.signals.llm_error.emit(str(exc))
 
@@ -288,10 +297,15 @@ class AppController(QObject):
         self._stream_transcript: str = ""
         self._stream_stt_latency_total_ms: int = 0
         self._stream_chunk_count: int = 0
-        # FIFO queue of WAV chunks waiting to be transcribed. We send ONE at a
-        # time to the local server (it is single-threaded) — this is the core
-        # fix for the "speak for minutes then it just closes" overload bug.
-        self._stream_queue: deque[bytes] = deque()
+        # FIFO queue of time-tagged AudioChunks waiting to be transcribed. We
+        # send ONE at a time to the local server (it is single-threaded) — this
+        # is the core fix for the "speak for minutes then it just closes" bug.
+        self._stream_queue: deque[AudioChunk] = deque()
+        # Time-based transcript assembly (word timings → deterministic dedup).
+        self._stream_assembler = TimelineAssembler()
+        # Coverage ledger: fresh time ranges whose transcription failed even
+        # after retry — logged at finalize so missing speech is diagnosable.
+        self._stream_coverage_gaps: list[tuple[float, float]] = []
         # True while a chunk request is in flight (waiting on the server).
         self._stream_busy: bool = False
         # True once the user has stopped recording (recording_stopped fired).
@@ -316,6 +330,12 @@ class AppController(QObject):
         self._llm_pool: ProviderPool | None = None
         # Last LLM error message — carried to the "all exhausted" notification
         self._last_llm_error: str = ""
+        # Smart-rotation tracker: learns each LLM provider's live headroom
+        # from usage + rate-limit signals so selection prefers whoever has the
+        # most remaining capacity for THIS request. Persists across sessions
+        # (cooldowns/usage windows are time-based) so a 429 in one session
+        # still steers the next.
+        self._rotation = RotationTracker()
 
         # Wire all services and signals in setup()
         # Two hotkeys: dictation hotkey and AI hotkey
@@ -367,6 +387,7 @@ class AppController(QObject):
         self._worker_signals.stt_error.connect(self._on_stt_error)
         self._worker_signals.llm_complete.connect(self._on_llm_complete)
         self._worker_signals.llm_error.connect(self._on_llm_error)
+        self._worker_signals.llm_rate_limited.connect(self._on_llm_rate_limited)
         self._worker_signals.chunk_stt_complete.connect(self._on_chunk_stt_complete)
         self._worker_signals.chunk_stt_error.connect(self._on_chunk_stt_error)
 
@@ -473,12 +494,19 @@ class AppController(QObject):
         self._stream_busy = False
         self._stream_recording_done = False
         self._stream_last_error = ""
+        self._stream_assembler.reset()
+        self._stream_coverage_gaps = []
         # New generation — any in-flight worker from a prior session is now stale.
         self._stream_generation += 1
 
         # Clear any leftover overlap audio from a previous session so the new
         # recording can never be contaminated with words from the last one.
         self._chunked_audio.reset()
+
+        # Voice processing (Process Audio toggle): applied per session so a
+        # settings change takes effect on the next recording without restart.
+        self._chunked_audio.set_conditioning(self._settings.process_audio)
+        self._audio_service.set_conditioning(self._settings.process_audio)
 
         active_stt = self._active_stt_providers()
         self._stt_pool = ProviderPool(active_stt)
@@ -602,14 +630,14 @@ class AppController(QObject):
     #     back, and we distinguish "server down" from "no speech".
     # ------------------------------------------------------------------
 
-    @Slot(bytes)
-    def _on_chunk_ready(self, wav_bytes: bytes) -> None:
+    @Slot(object)
+    def _on_chunk_ready(self, chunk: AudioChunk) -> None:
         """A finalized audio chunk is ready. Enqueue it and pump the queue."""
         if self._state not in (SessionState.STREAMING, SessionState.PROCESSING):
             return
-        if not wav_bytes:
+        if not chunk or not chunk.wav_bytes:
             return
-        self._stream_queue.append(wav_bytes)
+        self._stream_queue.append(chunk)
         self._pump_stream_queue()
 
     def _pump_stream_queue(self) -> None:
@@ -633,7 +661,7 @@ class AppController(QObject):
         if not self._settings.stt_providers:
             return
 
-        wav_bytes = self._stream_queue.popleft()
+        chunk = self._stream_queue.popleft()
         provider = self._settings.stt_providers[0]
         api_key = self._credential_store.get_key(provider.id)
         self._stream_busy = True
@@ -643,7 +671,7 @@ class AppController(QObject):
             generation=self._stream_generation,
             stt_client=self._stt_client,
             provider=provider,
-            audio=wav_bytes,
+            chunk=chunk,
             api_key=api_key,
             signals=self._worker_signals,
         )
@@ -738,8 +766,10 @@ class AppController(QObject):
         # Pump in case the queue is idle (e.g. nothing was in flight).
         self._pump_stream_queue()
 
-    @Slot(int, str)
-    def _on_chunk_stt_complete(self, generation: int, transcript: str) -> None:
+    @Slot(int, object, object)
+    def _on_chunk_stt_complete(
+        self, generation: int, chunk: AudioChunk, result
+    ) -> None:
         """A chunk transcript arrived. Merge it, then send the next queued chunk."""
         if generation != self._stream_generation:
             return  # stale result from a previous session — ignore
@@ -748,9 +778,12 @@ class AppController(QObject):
 
         self._stream_busy = False
 
-        if transcript.strip():
-            self._stream_transcript = merge_transcript(
-                self._stream_transcript, transcript
+        if result.text.strip() or result.has_word_timings:
+            self._stream_transcript = self._stream_assembler.add_chunk(
+                chunk_start_sec=chunk.start_sec,
+                fresh_start_sec=chunk.fresh_start_sec,
+                text=result.text,
+                words=result.words,
             )
             self.pill_vm.transcript_text = self._stream_transcript  # type: ignore[assignment]
             self._stream_chunk_count += 1
@@ -762,16 +795,30 @@ class AppController(QObject):
         # Send the next queued chunk (or finalize if done).
         self._pump_stream_queue()
 
-    @Slot(int, str)
-    def _on_chunk_stt_error(self, generation: int, error: str) -> None:
-        """A chunk failed. Record it, then continue with the next queued chunk —
-        a single failed chunk must never abort the whole session."""
+    @Slot(int, object, str)
+    def _on_chunk_stt_error(self, generation: int, chunk: AudioChunk, error: str) -> None:
+        """A chunk failed. Retry it once (the audio is still in hand), then
+        continue with the next queued chunk — a single failed chunk must never
+        abort the whole session."""
         if generation != self._stream_generation:
             return  # stale result — ignore
         if self._state not in (SessionState.STREAMING, SessionState.PROCESSING):
             return
 
         self._stream_busy = False
+
+        # One retry per chunk: transient hiccups (server warm-up, socket reset)
+        # shouldn't cost the user that time range. Re-queue at the FRONT so
+        # capture order — and therefore assembly order — is preserved.
+        if chunk.attempts < 1:
+            chunk.attempts += 1
+            self._stream_queue.appendleft(chunk)
+            self._pump_stream_queue()
+            return
+
+        # Retry exhausted — record the lost fresh range in the coverage ledger
+        # so the gap is visible in the logs instead of silently missing.
+        self._stream_coverage_gaps.append((chunk.fresh_start_sec, chunk.end_sec))
         self._stream_last_error = error
         try:
             self._logger.log_fallback(
@@ -783,7 +830,11 @@ class AppController(QObject):
                         if self._settings.stt_providers
                         else "local"
                     ),
-                    reason=error,
+                    reason=(
+                        f"{error} [lost audio "
+                        f"{chunk.fresh_start_sec:.1f}s-{chunk.end_sec:.1f}s "
+                        f"after retry]"
+                    ),
                     fallback_provider_id="none",
                 )
             )
@@ -821,6 +872,19 @@ class AppController(QObject):
         stt_latency_ms = self._stream_stt_latency_total_ms // max(
             self._stream_chunk_count, 1
         )
+
+        # Surface coverage gaps: the user should know a range went missing
+        # rather than discovering truncated text later (production guarantee —
+        # no silent loss).
+        if final_transcript and self._stream_coverage_gaps:
+            ranges = ", ".join(
+                f"{start:.0f}–{end:.0f}s" for start, end in self._stream_coverage_gaps
+            )
+            self._notify(
+                "Partial transcription",
+                f"Some audio could not be transcribed ({ranges} into the "
+                "recording). The rest was pasted.",
+            )
 
         # If we got ANY text, use it — even if a later chunk failed. Losing a
         # tail is far better than discarding everything the user said.
@@ -1040,16 +1104,25 @@ class AppController(QObject):
             self._finish_session()
             return
 
-        # Find the next provider we haven't tried yet this session
+        # Candidates: enabled providers not yet tried this session and within
+        # the user's hard daily quota (a real cap — the tracker only reorders,
+        # it never excludes, so quota stays an explicit hard gate here).
+        untried = [
+            p
+            for p in self._llm_pool.providers
+            if p.id not in self._llm_attempted_ids and self._router.is_eligible(p)
+        ]
+
+        system_prompt = self._build_system_prompt()
         provider = None
-        for _ in range(len(self._llm_pool.providers)):
-            try:
-                candidate = self._router.next_provider(self._llm_pool)
-            except ProviderError:
-                break
-            if candidate.id not in self._llm_attempted_ids:
-                provider = candidate
-                break
+        if untried:
+            if self._settings.llm_smart_rotation and len(untried) > 1:
+                # Smart rotation: order by live headroom for THIS request size.
+                # estimate_tokens already includes a completion reserve.
+                est = estimate_tokens(transcript + (system_prompt or ""))
+                provider = self._rotation.select(untried, est)[0]
+            else:
+                provider = untried[0]
 
         if provider is None:
             # All providers tried and failed — surface the last actual error
@@ -1078,7 +1151,7 @@ class AppController(QObject):
             transcript,
             api_key,
             self._worker_signals,
-            system_prompt=self._build_system_prompt(),
+            system_prompt=system_prompt,
         )
         QThreadPool.globalInstance().start(worker)
 
@@ -1110,15 +1183,24 @@ class AppController(QObject):
         )
         return (base + addendum) if base else addendum.lstrip()
 
-    @Slot(str)
-    def _on_llm_complete(self, response: str) -> None:
+    @Slot(object)
+    def _on_llm_complete(self, result) -> None:
         if self._state != SessionState.PROCESSING:
             return
 
         assert self._llm_provider is not None
         assert self._llm_start is not None
 
+        response = result.text
         self._router.record_usage(self._llm_provider.id)
+        # Feed the smart-rotation tracker the live usage + limit signals this
+        # response carried, so the next request prefers whoever has headroom.
+        self._rotation.record_success(
+            self._llm_provider.id,
+            total_tokens=result.total_tokens,
+            remaining_requests=result.remaining_requests,
+            remaining_tokens=result.remaining_tokens,
+        )
         llm_latency_ms = int((datetime.now() - self._llm_start).total_seconds() * 1000)
 
         # Guard against empty LLM output — pasting "" would leave the old
@@ -1158,12 +1240,45 @@ class AppController(QObject):
         )
         self._finish_session()
 
+    @Slot(str, float)
+    def _on_llm_rate_limited(self, provider_id: str, retry_after_s: float) -> None:
+        """A provider returned HTTP 429 — put it on cooldown and fall back.
+
+        The cooldown steers selection away from this provider for the stated
+        Retry-After window, across this and future sessions, until a success
+        clears it. This is the core of free-tier juggling."""
+        if self._state != SessionState.PROCESSING:
+            return
+        assert self._llm_provider is not None
+
+        self._rotation.record_rate_limited(provider_id, retry_after_s)
+        self._last_llm_error = f"{self._llm_provider.name}: rate limited (429)"
+        self.llm_error_occurred.emit(self._last_llm_error)
+        self._logger.log_fallback(
+            FallbackLogEntry(
+                session_id=self._session_id,
+                timestamp=datetime.now().isoformat(),
+                original_provider_id=provider_id,
+                reason=f"rate-limited; cooldown {retry_after_s:.0f}s",
+                fallback_provider_id="next",
+            )
+        )
+        self._dispatch_llm(
+            transcript=self._current_transcript,
+            stt_provider_id=self._pending_stt_provider_id,
+            stt_latency_ms=self._pending_stt_latency_ms,
+        )
+
     @Slot(str)
     def _on_llm_error(self, error: str) -> None:
         if self._state != SessionState.PROCESSING:
             return
 
         assert self._llm_provider is not None
+
+        # Non-429 failure (network, 5xx, timeout): brief cooldown so the next
+        # session fans out, but never a hard exclusion.
+        self._rotation.record_error(self._llm_provider.id)
 
         # Capture error for the exhaustion notification and emit immediately
         # so the UI can show which provider and what went wrong.

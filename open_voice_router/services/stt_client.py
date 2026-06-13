@@ -5,18 +5,24 @@ Supports:
 - AssemblyAI (api.assemblyai.com) — native AssemblyAI v2 async API
 - Generic fallback               — OpenAI-compatible /v1/audio/transcriptions
 
+Every adapter returns a normalized :class:`TranscriptionResult` — the plain
+transcript plus optional word-level timings. Word timings power the
+time-based overlap dedup in the streaming path; adapters that cannot provide
+them return ``words=None`` and the assembler falls back to text merging.
+
 Implements Requirements 6.1, 6.2.
-Timeout: 30 seconds.
 """
 
 from __future__ import annotations
 
 import asyncio
-
-import httpx
+from typing import TYPE_CHECKING
 
 from open_voice_router.exceptions import ProviderError
-from open_voice_router.models import ProviderConfig
+from open_voice_router.models import ProviderConfig, TranscriptionResult, WordTiming
+
+if TYPE_CHECKING:  # httpx is imported lazily — it costs ~19 MB of RAM and is
+    import httpx   # only needed while a transcription request is in flight.
 
 # ---------------------------------------------------------------------------
 # Named provider presets (kept for reference / UI pre-fill)
@@ -35,16 +41,44 @@ STT_PRESETS: dict[str, dict] = {
     },
 }
 
-_STT_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+# Timeout parameters as plain floats; the httpx.Timeout objects are built
+# lazily inside transcribe() so importing this module never pulls in httpx.
+_STT_READ_TIMEOUT_S = 60.0
+_STT_CONNECT_TIMEOUT_S = 10.0
 # Local STT runs a synchronous ONNX model that can take a while on a long
 # recording (it silence-splits and transcribes each segment). Give localhost a
 # much more generous read timeout so long utterances never time out.
-_LOCAL_STT_TIMEOUT = httpx.Timeout(300.0, connect=5.0)
+_LOCAL_READ_TIMEOUT_S = 300.0
+_LOCAL_CONNECT_TIMEOUT_S = 5.0
+# AssemblyAI async polling deadline (seconds).
+_ASSEMBLYAI_POLL_DEADLINE_S = 60.0
 
 
 def _is_local(provider: ProviderConfig) -> bool:
     base = (provider.base_url or "").lower()
     return "127.0.0.1" in base or "localhost" in base
+
+
+def _parse_words(raw: object) -> tuple[WordTiming, ...] | None:
+    """Parse an OpenAI-style ``words`` array into WordTiming tuples.
+
+    Returns None when the payload is missing or malformed — word timings are
+    an enhancement, never a hard requirement.
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    words: list[WordTiming] = []
+    try:
+        for item in raw:
+            text = str(item["word"]).strip()
+            if not text:
+                continue
+            words.append(
+                WordTiming(word=text, start=float(item["start"]), end=float(item["end"]))
+            )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return tuple(words) or None
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +91,7 @@ async def _transcribe_deepgram(
     provider: ProviderConfig,
     audio: bytes,
     api_key: str | None,
-) -> str:
+) -> TranscriptionResult:
     """POST raw WAV bytes to Deepgram's /v1/listen endpoint."""
     url = f"{provider.base_url.rstrip('/')}/v1/listen"
     params = {
@@ -74,13 +108,16 @@ async def _transcribe_deepgram(
     response.raise_for_status()
     data = response.json()
     try:
-        transcript = data["results"]["channels"][0]["alternatives"][0]["transcript"]
+        alternative = data["results"]["channels"][0]["alternatives"][0]
+        transcript = alternative["transcript"]
     except (KeyError, IndexError, TypeError) as exc:
         raise ProviderError(
             f"Deepgram response missing expected structure: {exc}. Response: {data}"
         ) from exc
+    # Deepgram always includes word timings — pass them through.
+    words = _parse_words(alternative.get("words"))
     # Empty transcript is valid (silence) — return it as-is
-    return transcript
+    return TranscriptionResult(text=transcript, words=words)
 
 
 async def _transcribe_assemblyai(
@@ -88,7 +125,7 @@ async def _transcribe_assemblyai(
     provider: ProviderConfig,
     audio: bytes,
     api_key: str | None,
-) -> str:
+) -> TranscriptionResult:
     """Upload WAV bytes to AssemblyAI and poll until transcription completes."""
     base = provider.base_url.rstrip("/")
     headers = {"Authorization": api_key or ""}
@@ -111,22 +148,40 @@ async def _transcribe_assemblyai(
     transcript_resp.raise_for_status()
     transcript_id: str = transcript_resp.json()["id"]
 
-    # Step 3: poll until completed or error (max 30 s, poll every 2 s)
+    # Step 3: poll until completed or error (poll every 2 s up to the deadline)
     poll_url = f"{base}/v2/transcript/{transcript_id}"
-    deadline = asyncio.get_event_loop().time() + _STT_TIMEOUT
+    deadline = asyncio.get_event_loop().time() + _ASSEMBLYAI_POLL_DEADLINE_S
     while True:
         poll_resp = await client.get(poll_url, headers=headers)
         poll_resp.raise_for_status()
         body = poll_resp.json()
         status = body.get("status")
         if status == "completed":
-            return body["text"]
+            # AssemblyAI word timings are in milliseconds — normalize to seconds.
+            words = None
+            raw_words = body.get("words")
+            if isinstance(raw_words, list) and raw_words:
+                try:
+                    words = tuple(
+                        WordTiming(
+                            word=str(w["text"]).strip(),
+                            start=float(w["start"]) / 1000.0,
+                            end=float(w["end"]) / 1000.0,
+                        )
+                        for w in raw_words
+                        if str(w["text"]).strip()
+                    ) or None
+                except (KeyError, TypeError, ValueError):
+                    words = None
+            return TranscriptionResult(text=body["text"], words=words)
         if status == "error":
             raise ProviderError(
                 f"AssemblyAI transcription error: {body.get('error', 'unknown')}"
             )
         if asyncio.get_event_loop().time() >= deadline:
-            raise ProviderError("AssemblyAI transcription timed out after 30 s")
+            raise ProviderError(
+                f"AssemblyAI transcription timed out after {_ASSEMBLYAI_POLL_DEADLINE_S:.0f} s"
+            )
         await asyncio.sleep(2)
 
 
@@ -135,8 +190,14 @@ async def _transcribe_generic(
     provider: ProviderConfig,
     audio: bytes,
     api_key: str | None,
-) -> str:
-    """POST to an OpenAI-compatible /v1/audio/transcriptions endpoint."""
+) -> TranscriptionResult:
+    """POST to an OpenAI-compatible /v1/audio/transcriptions endpoint.
+
+    For local providers we request ``verbose_json`` with word granularity so
+    the streaming assembler can dedup overlap by time. Arbitrary remote
+    endpoints may not support that, so they get the plain ``json`` format.
+    If a local server replies without a ``words`` array we degrade to text.
+    """
     url = f"{provider.base_url.rstrip('/')}/v1/audio/transcriptions"
     # Only send Authorization header if an API key is actually present.
     # Local providers (Parakeet) reject empty Bearer headers.
@@ -144,10 +205,17 @@ async def _transcribe_generic(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     files = {"file": ("audio.wav", audio, "audio/wav")}
-    data = {"model": provider.model}
+    data: dict[str, str] = {"model": provider.model}
+    if _is_local(provider):
+        data["response_format"] = "verbose_json"
+        data["timestamp_granularities[]"] = "word"
     response = await client.post(url, headers=headers, files=files, data=data)
     response.raise_for_status()
-    return response.json().get("text") or ""
+    body = response.json()
+    return TranscriptionResult(
+        text=body.get("text") or "",
+        words=_parse_words(body.get("words")),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +241,7 @@ class STTClient:
         provider: ProviderConfig,
         audio: bytes,
         api_key: str | None = None,
-    ) -> str:
+    ) -> TranscriptionResult:
         """Transcribe *audio* (WAV bytes) using *provider*.
 
         Args:
@@ -182,13 +250,20 @@ class STTClient:
             api_key:  API key for the provider (not stored in ProviderConfig).
 
         Returns:
-            The transcript as a plain string.
+            A :class:`TranscriptionResult` with the transcript and, when the
+            provider supplies them, word-level timings.
 
         Raises:
             ProviderError: On HTTP errors, timeouts, or provider-side errors.
         """
+        import httpx  # lazy — see module docstring note
+
         try:
-            timeout = _LOCAL_STT_TIMEOUT if _is_local(provider) else _STT_TIMEOUT
+            timeout = (
+                httpx.Timeout(_LOCAL_READ_TIMEOUT_S, connect=_LOCAL_CONNECT_TIMEOUT_S)
+                if _is_local(provider)
+                else httpx.Timeout(_STT_READ_TIMEOUT_S, connect=_STT_CONNECT_TIMEOUT_S)
+            )
             async with httpx.AsyncClient(timeout=timeout) as client:
                 base = provider.base_url.lower()
                 if "api.deepgram.com" in base:

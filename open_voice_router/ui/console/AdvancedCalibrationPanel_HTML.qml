@@ -357,6 +357,53 @@ Item {
         color: textGhost
     }
 
+    // Larger heading that groups several cards into one logical section.
+    // Semibold (not heavy) per the requested type weight.
+    //
+    // IMPORTANT: this is a plain Item, NOT a nested Layout. A nested
+    // ColumnLayout/RowLayout reports a real implicitWidth (its longest text),
+    // which the content ScrollView latches onto and collapses every sibling
+    // card to ~1/3 width. A plain Item with Layout.fillWidth fills the column
+    // while contributing zero implicitWidth — exactly like the SectionCards.
+    component GroupHeader: Item {
+        property string title: ""
+        property string subtitle: ""
+        Layout.fillWidth: true
+        Layout.topMargin: 6
+        Layout.bottomMargin: 2
+        implicitHeight: _ghTitle.implicitHeight
+                        + (_ghSub.visible ? _ghSub.implicitHeight + 3 : 0)
+
+        Text {
+            id: _ghTitle
+            anchors { left: parent.left; top: parent.top }
+            text: title
+            font.family: "Plus Jakarta Sans"
+            font.pixelSize: 15
+            font.weight: Font.DemiBold
+            color: textPrimary
+        }
+        Rectangle {
+            anchors {
+                left: _ghTitle.right; leftMargin: 12; right: parent.right
+                verticalCenter: _ghTitle.verticalCenter
+            }
+            height: 1
+            color: divider
+        }
+        Text {
+            id: _ghSub
+            anchors { left: parent.left; right: parent.right; top: _ghTitle.bottom; topMargin: 3 }
+            visible: subtitle.length > 0
+            text: subtitle
+            font.family: "JetBrains Mono"
+            font.pixelSize: 9
+            font.letterSpacing: 0.5
+            color: textGhost
+            elide: Text.ElideRight
+        }
+    }
+
     component FieldLabel: Text {
         font.family: "Plus Jakarta Sans"
         font.pixelSize: 14
@@ -557,7 +604,7 @@ Item {
                                 Text {
                                     id: _csGrainPill
                                     anchors.centerIn: parent
-                                    text: "coming soon"
+                                    text: "select text → instruct"
                                     font.family: "JetBrains Mono"
                                     font.pixelSize: 9
                                     color: Qt.rgba(0.078, 0.075, 0.071, 0.4)
@@ -702,23 +749,29 @@ Item {
 
                         SettingRow {
                             label: "Process Audio"
-                            hint: "Enable real-time audio processing pipeline"
+                            hint: "85 Hz rumble filter + auto gain for quiet mics, applied before transcription"
 
                             Rectangle {
                                 height: 18
                                 width: _csAudioText.implicitWidth + 12
                                 radius: 9
-                                color: Qt.rgba(0.078, 0.075, 0.071, 0.06)
-                                border.color: Qt.rgba(0.078, 0.075, 0.071, 0.15)
+                                color: consoleViewModel.process_audio
+                                       ? Qt.rgba(0.063, 0.725, 0.506, 0.10)
+                                       : Qt.rgba(0.078, 0.075, 0.071, 0.06)
+                                border.color: consoleViewModel.process_audio
+                                       ? Qt.rgba(0.063, 0.725, 0.506, 0.4)
+                                       : Qt.rgba(0.078, 0.075, 0.071, 0.15)
                                 border.width: 1
 
                                 Text {
                                     id: _csAudioText
                                     anchors.centerIn: parent
-                                    text: "coming soon"
+                                    text: consoleViewModel.process_audio ? "active" : "off"
                                     font.family: "JetBrains Mono"
                                     font.pixelSize: 9
-                                    color: Qt.rgba(0.078, 0.075, 0.071, 0.4)
+                                    color: consoleViewModel.process_audio
+                                           ? "#10B981"
+                                           : Qt.rgba(0.078, 0.075, 0.071, 0.4)
                                 }
                             }
 
@@ -755,13 +808,9 @@ Item {
                             label: "Launch Minimized"
                             hint: "Start silently in tray — turn off to open console on launch"
                             MechanicalToggle {
-                                id: startMinimizedToggle
-                                checked: (typeof consoleViewModel !== "undefined" && consoleViewModel)
-                                         ? consoleViewModel.start_minimized : true
-                                Connections {
-                                    target: (typeof consoleViewModel !== "undefined") ? consoleViewModel : null
-                                    function onStart_minimized_changed(val) { startMinimizedToggle.checked = val }
-                                }
+                                // Controlled — stays in sync if changed elsewhere.
+                                value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        ? consoleViewModel.start_minimized : true
                                 onToggled: {
                                     if (typeof consoleViewModel !== "undefined" && consoleViewModel)
                                         consoleViewModel.save_start_minimized(checked)
@@ -773,7 +822,9 @@ Item {
                             label: "Play Sound"
                             hint: "Play confirmation sounds on keybind triggers"
                             MechanicalToggle {
-                                checked: consoleViewModel.play_sound
+                                // Controlled — mirrors the quick panel's Play Sound toggle.
+                                value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        ? consoleViewModel.play_sound : true
                                 onToggled: consoleViewModel.save_play_sound(checked)
                             }
                         }
@@ -782,7 +833,9 @@ Item {
                             label: "Close to System Tray"
                             hint: "Minimize to tray instead of quitting"
                             MechanicalToggle {
-                                checked: consoleViewModel.close_to_tray
+                                // Controlled — mirrors the quick panel's tray toggle.
+                                value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        ? consoleViewModel.close_to_tray : true
                                 onToggled: consoleViewModel.save_close_to_tray(checked)
                             }
                         }
@@ -807,6 +860,12 @@ Item {
             ColumnLayout {
                 width: parent.width - 16
                 spacing: 14
+
+                // ════ OFFLINE MODULE CONFIGURATION ════
+                GroupHeader {
+                    title: "Configure Local Model"
+                    subtitle: "OFFLINE MODULE CONFIGURATION — ENGINE + STREAM PARAMETERS"
+                }
 
                 // ── Offline Weights ────────────────────────────
                 SectionCard {
@@ -846,6 +905,23 @@ Item {
                         return consoleViewModel.local_stt_status || "not_installed"
                     }
 
+                    // Model registry catalog + current selection (both live from
+                    // the backend; local_stt_model_id re-binds on its notify signal).
+                    readonly property var modelCatalog:
+                        (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                            ? consoleViewModel.local_stt_models : []
+                    readonly property string selectedModelId:
+                        (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                            ? consoleViewModel.local_stt_model_id : ""
+                    function selectedModelEntry() {
+                        for (var i = 0; i < modelCatalog.length; i++)
+                            if (modelCatalog[i].id === selectedModelId) return modelCatalog[i]
+                        return null
+                    }
+                    function ramLabel(mb) {
+                        return mb >= 1000 ? (mb / 1000).toFixed(1) + " GB" : mb + " MB"
+                    }
+
                     // Backend signal hooks
                     Connections {
                         target: (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
@@ -867,7 +943,7 @@ Item {
                         SectionTitle { text: "OFFLINE ENGINE WEIGHTS" }
                         Rectangle { Layout.fillWidth: true; height: 1; color: divider }
 
-                        // ── Parakeet 0.6B ──────────────────────────────────────────
+                        // ── Active local model (from the registry) ─────────────────
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 16
@@ -878,7 +954,10 @@ Item {
                                 spacing: 4
 
                                 FieldLabel {
-                                    text: "Parakeet 0.6B"
+                                    text: {
+                                        var m = offlineWeightsCard.selectedModelEntry()
+                                        return m ? m.name : "Local model"
+                                    }
                                     font.pixelSize: 14
                                     font.bold: true
                                 }
@@ -900,12 +979,14 @@ Item {
                                     FieldSubtitle {
                                         text: {
                                             var s = offlineWeightsCard.liveStatus
+                                            var m = offlineWeightsCard.selectedModelEntry()
+                                            var ram = m ? offlineWeightsCard.ramLabel(m.ramMb) : ""
                                             if (s === "running")    return "loaded · active"
                                             if (s === "starting")   return "starting server…"
                                             if (s === "installing") return "installing…"
                                             if (s === "stopped")    return "installed · not loaded"
                                             if (s === "error")      return "error — see retry below"
-                                            return "~400 MB · downloads on first start"
+                                            return "~" + ram + " RAM · downloads on first start"
                                         }
                                     }
                                 }
@@ -1046,7 +1127,7 @@ Item {
                         // Server-start message
                         Text {
                             visible: offlineWeightsCard.liveStatus === "starting"
-                            text: "Starting Parakeet server — the model loads on first launch (~30 s)."
+                            text: "Starting local STT server — the model loads on first launch (~30 s)."
                             font.family: "JetBrains Mono"; font.pixelSize: 9
                             color: textMuted; Layout.fillWidth: true; wrapMode: Text.WordWrap
                         }
@@ -1060,7 +1141,9 @@ Item {
                         }
                     }
 
-                    // EXPANDED SECTION — "more coming soon" stub (no fake models)
+                    // EXPANDED SECTION — model catalog from the registry.
+                    // Selecting a model persists it, retargets the sidecar, and
+                    // installs any missing engine packages (all backend-driven).
                     ColumnLayout {
                         id: expandedModelsColumn
                         anchors {
@@ -1077,34 +1160,31 @@ Item {
                         Behavior on opacity { NumberAnimation { duration: 250 } }
 
                         Text {
-                            text: "Additional models coming soon"
-                            font.family: "JetBrains Mono"; font.pixelSize: 10; font.italic: true
+                            text: "AVAILABLE MODELS — accuracy vs. memory"
+                            font.family: "JetBrains Mono"; font.pixelSize: 9
+                            font.bold: true; font.letterSpacing: 1.2
                             color: textGhost; Layout.fillWidth: true
                         }
 
-                        // Tombstone Repeater kept so the closing braces below still compile
                         Repeater {
-                            model: []  // empty — all fake models removed
+                            model: offlineWeightsCard.modelCatalog
 
                             delegate: Item {
                                 Layout.fillWidth: true
-                                height: 48
-                                visible: modelData !== offlineWeightsCard.selectedModelId
+                                height: 52
+
+                                property bool isActive: modelData.id === offlineWeightsCard.selectedModelId
 
                                 Rectangle {
                                     anchors.fill: parent
                                     radius: 8
-                                    color: modelHover.containsMouse ? Qt.rgba(0,0,0,0.04) : "transparent"
+                                    color: isActive ? Qt.rgba(0,0,0,0.05)
+                                         : (modelHover.containsMouse ? Qt.rgba(0,0,0,0.04) : "transparent")
+                                    border.color: isActive ? Qt.rgba(0,0,0,0.10) : "transparent"
+                                    border.width: isActive ? 1 : 0
                                     Behavior on color { ColorAnimation { duration: 150 } }
 
                                     HoverHandler { id: modelHover }
-
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        enabled: offlineWeightsCard.getModelState(modelData).status === "installed"
-                                        onClicked: offlineWeightsCard.selectModel(modelData)
-                                    }
 
                                     RowLayout {
                                         anchors.fill: parent
@@ -1117,119 +1197,31 @@ Item {
                                             spacing: 2
 
                                             FieldLabel {
-                                                text: offlineWeightsCard.modelInfo[modelData].name
+                                                text: modelData.name
                                                 font.pixelSize: 12
                                             }
                                             FieldSubtitle {
-                                                text: offlineWeightsCard.modelInfo[modelData].size
+                                                text: (modelData.installed ? "installed · " : "")
+                                                      + modelData.wer
+                                                      + " · ~" + offlineWeightsCard.ramLabel(modelData.ramMb) + " RAM"
+                                                      + " · " + modelData.languages
                                             }
                                         }
 
                                         Item { Layout.fillWidth: true }
 
-                                        // Delete icon (trash can) - LEFT of button
-                                        Rectangle {
-                                            width: 28
-                                            height: 28
-                                            radius: 6
-                                            color: deleteRowHover.containsMouse ? Qt.rgba(0.8, 0.2, 0.2, 0.1) : "transparent"
-                                            visible: offlineWeightsCard.getModelState(modelData).status === "installed"
-
-                                            Canvas {
-                                                anchors.centerIn: parent
-                                                width: 14
-                                                height: 14
-                                                onPaint: {
-                                                    var ctx = getContext("2d")
-                                                    ctx.clearRect(0, 0, width, height)
-                                                    ctx.strokeStyle = deleteRowHover.containsMouse ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.4)
-                                                    ctx.lineWidth = 1.5
-                                                    ctx.lineCap = "round"
-                                                    ctx.strokeRect(2, 4, 10, 9)
-                                                    ctx.beginPath()
-                                                    ctx.moveTo(1, 4)
-                                                    ctx.lineTo(13, 4)
-                                                    ctx.stroke()
-                                                    ctx.beginPath()
-                                                    ctx.moveTo(5, 4)
-                                                    ctx.lineTo(5, 2)
-                                                    ctx.lineTo(9, 2)
-                                                    ctx.lineTo(9, 4)
-                                                    ctx.stroke()
-                                                }
-                                            }
-
-                                            HoverHandler {
-                                                id: deleteRowHover
-                                                onHoveredChanged: parent.children[0].requestPaint()
-                                            }
-
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: offlineWeightsCard.deleteModel(modelData)
-                                            }
-                                        }
-
-                                        // Progress (left of button)
-                                        Item {
-                                            Layout.preferredWidth: 120
-                                            Layout.preferredHeight: 32
-                                            visible: offlineWeightsCard.getModelState(modelData).status === "installing"
-
-                                            RowLayout {
-                                                anchors.fill: parent
-                                                spacing: 10
-
-                                                // Percentage
-                                                Text {
-                                                    text: Math.floor(offlineWeightsCard.getModelState(modelData).progress) + "%"
-                                                    font.family: "JetBrains Mono"
-                                                    font.pixelSize: 11
-                                                    font.bold: true
-                                                    color: orange
-                                                    Layout.preferredWidth: 40
-                                                }
-
-                                                // Progress bar
-                                                Rectangle {
-                                                    Layout.fillWidth: true
-                                                    Layout.preferredHeight: 6
-                                                    radius: 3
-                                                    color: Qt.rgba(0,0,0,0.1)
-
-                                                    Rectangle {
-                                                        anchors.left: parent.left
-                                                        anchors.top: parent.top
-                                                        anchors.bottom: parent.bottom
-                                                        width: parent.width * (offlineWeightsCard.getModelState(modelData).progress / 100)
-                                                        radius: 3
-                                                        color: orange
-                                                        Behavior on width { NumberAnimation { duration: 100 } }
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        // Button
+                                        // Select / Active button
                                         Rectangle {
                                             width: 100
                                             height: 32
                                             radius: 6
-
-                                            property string btnStatus: offlineWeightsCard.getModelState(modelData).status
-
                                             color: {
-                                                if (btnStatus === "selected") return charcoal
-                                                if (btnStatus === "installed") return Qt.rgba(0.078, 0.075, 0.071, 0.15)
-                                                if (btnStatus === "installing") return orange
-                                                if (installBtnHover.containsMouse) return Qt.rgba(1, 0.365, 0.118, 0.85)
-                                                return orange
+                                                if (isActive) return charcoal
+                                                if (selectBtnHover.containsMouse) return Qt.rgba(1, 0.365, 0.118, 0.85)
+                                                return Qt.rgba(0.078, 0.075, 0.071, 0.15)
                                             }
-
-                                            border.color: btnStatus === "installed" ? divider : "transparent"
-                                            border.width: btnStatus === "installed" ? 1 : 0
-
+                                            border.color: isActive ? "transparent" : divider
+                                            border.width: isActive ? 0 : 1
                                             Behavior on color { ColorAnimation { duration: 120 } }
 
                                             RowLayout {
@@ -1241,42 +1233,42 @@ Item {
                                                     font.pixelSize: 13
                                                     font.bold: true
                                                     color: green
-                                                    visible: parent.parent.btnStatus === "selected"
+                                                    visible: isActive
                                                 }
 
                                                 Text {
-                                                    text: {
-                                                        var status = parent.parent.btnStatus
-                                                        if (status === "selected") return "SELECTED"
-                                                        if (status === "installed") return "INSTALLED"
-                                                        if (status === "installing") return "INSTALLING"
-                                                        return "INSTALL"
-                                                    }
+                                                    text: isActive ? "ACTIVE" : "SELECT"
                                                     font.family: "JetBrains Mono"
                                                     font.pixelSize: 9
                                                     font.bold: true
                                                     font.letterSpacing: 0.5
-                                                    color: {
-                                                        var status = parent.parent.btnStatus
-                                                        if (status === "selected") return textLight
-                                                        if (status === "installed") return Qt.rgba(0.078, 0.075, 0.071, 0.5)
-                                                        return "white"
-                                                    }
+                                                    color: isActive ? textLight
+                                                         : (selectBtnHover.containsMouse ? "white"
+                                                            : Qt.rgba(0.078, 0.075, 0.071, 0.5))
                                                 }
                                             }
 
-                                            HoverHandler { id: installBtnHover }
+                                            HoverHandler { id: selectBtnHover }
 
                                             MouseArea {
                                                 anchors.fill: parent
                                                 cursorShape: Qt.PointingHandCursor
-                                                enabled: parent.btnStatus === "available"
-                                                onClicked: offlineWeightsCard.installModel(modelData)
+                                                enabled: !isActive
+                                                onClicked: {
+                                                    if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                                        consoleViewModel.save_local_stt_model(modelData.id)
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                        }
+
+                        Text {
+                            text: "Switching downloads the model on its first load. WER ≈ English Open ASR average; lower is better."
+                            font.family: "JetBrains Mono"; font.pixelSize: 9; font.italic: true
+                            color: textGhost; Layout.fillWidth: true; wrapMode: Text.WordWrap
                         }
                     }
 
@@ -1339,24 +1331,7 @@ Item {
                         SectionTitle { text: "REAL-TIME STREAM PARAMETERS" }
                         Rectangle { Layout.fillWidth: true; height: 1; color: divider }
 
-                        Repeater {
-                            model: [
-                                { label: "Rolling Window",   hint: "Audio buffer window duration",          opts: ["10s","15s","20s","25s"], idx: 2 },
-                                { label: "Overlap Delay",    hint: "Previous packet duration retention",    opts: ["1s","2s","3s"],          idx: 1 }
-                            ]
-                            SettingRow {
-                                label: modelData.label
-                                hint: modelData.hint
-                                ComboBox {
-                                    Layout.preferredWidth: 120
-                                    implicitHeight: 32
-                                    model: modelData.opts; currentIndex: modelData.idx
-                                    background: Rectangle { radius: 6; color: surfaceInput; border.color: divider; border.width: 1 }
-                                    contentItem: Text { leftPadding: 10; text: parent.displayText; font.family: "JetBrains Mono"; font.pixelSize: 11; color: textPrimary; verticalAlignment: Text.AlignVCenter }
-                                }
-                            }
-                        }
-
+                        // Model Unload — the only wired parameter; kept at the top.
                         SettingRow {
                             label: "Model Unload"
                             hint: "Auto-unload after this much idle time"
@@ -1381,10 +1356,39 @@ Item {
                                 contentItem: Text { leftPadding: 10; text: parent.displayText; font.family: "JetBrains Mono"; font.pixelSize: 11; color: textPrimary; verticalAlignment: Text.AlignVCenter }
                             }
                         }
+
+                        // Rolling Window — not user-configurable yet. A wrong value
+                        // can hurt accuracy, so it stays fixed (overlap is locked at
+                        // 2 s internally). Surfaced as "coming soon".
+                        SettingRow {
+                            label: "Rolling Window"
+                            hint: "Audio buffer window duration"
+
+                            Rectangle {
+                                Layout.preferredHeight: 22
+                                Layout.preferredWidth: _rwSoonText.implicitWidth + 18
+                                radius: 11
+                                color: Qt.rgba(0.078, 0.075, 0.071, 0.06)
+                                border.color: Qt.rgba(0.078, 0.075, 0.071, 0.15)
+                                border.width: 1
+                                Text {
+                                    id: _rwSoonText
+                                    anchors.centerIn: parent
+                                    text: "coming soon"
+                                    font.family: "JetBrains Mono"
+                                    font.pixelSize: 9
+                                    color: Qt.rgba(0.078, 0.075, 0.071, 0.4)
+                                }
+                            }
+                        }
                     }
                 }
 
-                Item { Layout.preferredHeight: 24 }
+                // ════ CLOUD MODEL CONFIGURATION ════
+                GroupHeader {
+                    title: "Cloud Model Configuration"
+                    subtitle: "STREAMING STT PROVIDERS — ADD, ENABLE, ROTATE"
+                }
 
                 // ── ADD NEW CLOUD PROVIDER ─────────────────────────────
                 SectionCard {
@@ -1708,8 +1712,11 @@ Item {
                                     color: textGhost
                                 }
                                 MechanicalToggle {
-                                    checked: installedProvidersCard.smartRotation
-                                    onCheckedChanged: {
+                                    // Controlled by the shared viewmodel (stays in sync with
+                                    // the quick panel); onToggled fires on user intent only,
+                                    // avoiding the binding/feedback issues of onCheckedChanged.
+                                    value: installedProvidersCard.smartRotation
+                                    onToggled: {
                                         if (typeof consoleViewModel !== "undefined" && consoleViewModel)
                                             consoleViewModel.set_stt_smart_rotation(checked)
                                     }
@@ -1759,7 +1766,7 @@ Item {
                                         }
                                     }
                                     MechanicalToggle {
-                                        checked: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
                                                   ? consoleViewModel.stt_local_enabled : true
                                         enabled: !installedProvidersCard.smartRotation
                                         onToggled: {
@@ -1891,7 +1898,7 @@ Item {
                                         }
 
                                         MechanicalToggle {
-                                            checked: modelData.enabled === true
+                                            value: modelData.enabled === true
                                             onToggled: {
                                                 if (typeof consoleViewModel !== "undefined" && consoleViewModel)
                                                     consoleViewModel.set_stt_provider_enabled(modelData.id, checked)
@@ -1923,10 +1930,37 @@ Item {
                 width: parent.width - 16
                 spacing: 14
 
+                // ════ PROVIDERS & ROUTING ════
+                GroupHeader {
+                    title: "Processing Models"
+                    subtitle: "ADD PROVIDERS, CHOOSE ROUTING & THE GRAIN ASSIST MODEL"
+                }
+
                 // ── ADD NEW LLM PROVIDER ─────────────────────────────
                 SectionCard {
                     id: addLlmProviderCard
                     property bool expanded: false
+
+                    // Preset list is the SINGLE SOURCE OF TRUTH from the backend
+                    // (PROVIDER_PRESETS via get_presets) — so every provider we
+                    // add server-side (Mistral, OpenRouter, …) appears here with
+                    // its correct default model + endpoint, no hardcoded drift.
+                    readonly property var llmPresets: {
+                        var out = []
+                        if (typeof consoleViewModel !== "undefined" && consoleViewModel) {
+                            var all = consoleViewModel.get_presets()
+                            for (var i = 0; i < all.length; i++)
+                                if (all[i].provider_type === "llm") out.push(all[i])
+                        }
+                        return out
+                    }
+                    readonly property var llmOptionNames: {
+                        var names = []
+                        for (var i = 0; i < llmPresets.length; i++) names.push(llmPresets[i].name)
+                        names.push("Custom Endpoint")
+                        return names
+                    }
+                    function isCustomIndex(i) { return i >= llmPresets.length }
 
                     implicitHeight: expanded ? (addLlmProviderCol.implicitHeight + 32 + addLlmFormColumn.implicitHeight + 16) : (addLlmProviderCol.implicitHeight + 32)
                     Behavior on implicitHeight { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
@@ -2053,18 +2087,19 @@ Item {
                                 id: llmProviderDropdown
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 40
-                                model: ["Gemini", "Groq", "Cerebras", "OpenAI / ChatGPT", "Anthropic", "Custom Endpoint"]
-                                Component.onCompleted: {
-                                    llmModelNameField.text = "gemini-2.0-flash"
+                                model: addLlmProviderCard.llmOptionNames
+                                // Auto-fill the model field from the selected preset
+                                // (empty for Custom so the user types their own).
+                                function _applyPreset() {
+                                    if (addLlmProviderCard.isCustomIndex(currentIndex)) {
+                                        llmModelNameField.text = ""
+                                    } else {
+                                        var p = addLlmProviderCard.llmPresets[currentIndex]
+                                        if (p) llmModelNameField.text = p.model
+                                    }
                                 }
-                                onCurrentIndexChanged: {
-                                    if      (currentText === "Gemini")           llmModelNameField.text = "gemini-2.0-flash"
-                                    else if (currentText === "Groq")             llmModelNameField.text = "llama-3.1-8b-instant"
-                                    else if (currentText === "Cerebras")         llmModelNameField.text = "llama-4-scout-17b-16e-instruct"
-                                    else if (currentText === "OpenAI / ChatGPT") llmModelNameField.text = "gpt-4o"
-                                    else if (currentText === "Anthropic")        llmModelNameField.text = "claude-3-5-sonnet-20241022"
-                                    else                                         llmModelNameField.text = ""
-                                }
+                                Component.onCompleted: _applyPreset()
+                                onCurrentIndexChanged: _applyPreset()
 
                                 background: Rectangle {
                                     radius: 6
@@ -2128,15 +2163,14 @@ Item {
                             Layout.fillWidth: true
                             Layout.preferredHeight: 40
                             placeholderText: "Endpoint URL"
-                            readOnly: llmProviderDropdown.currentText !== "Custom Endpoint"
-                            opacity: llmProviderDropdown.currentText !== "Custom Endpoint" ? 0.55 : 1.0
+                            readOnly: !addLlmProviderCard.isCustomIndex(llmProviderDropdown.currentIndex)
+                            opacity: addLlmProviderCard.isCustomIndex(llmProviderDropdown.currentIndex) ? 1.0 : 0.55
+                            // Preset endpoints come straight from the backend preset
+                            // data; Custom leaves the field empty + editable.
                             text: {
-                                if (llmProviderDropdown.currentText === "Gemini")           return "https://generativelanguage.googleapis.com/v1beta/openai"
-                                if (llmProviderDropdown.currentText === "Groq")             return "https://api.groq.com/openai/v1"
-                                if (llmProviderDropdown.currentText === "Cerebras")         return "https://api.cerebras.ai/v1"
-                                if (llmProviderDropdown.currentText === "OpenAI / ChatGPT") return "https://api.openai.com/v1"
-                                if (llmProviderDropdown.currentText === "Anthropic")        return "https://api.anthropic.com/v1"
-                                return ""
+                                if (addLlmProviderCard.isCustomIndex(llmProviderDropdown.currentIndex)) return ""
+                                var p = addLlmProviderCard.llmPresets[llmProviderDropdown.currentIndex]
+                                return p ? p.base_url : ""
                             }
                             font.family: "JetBrains Mono"
                             font.pixelSize: 11
@@ -2187,25 +2221,11 @@ Item {
                     id: installedLlmProvidersCard
                     implicitHeight: installedLlmCol.implicitHeight + 32
 
-                    // Managed imperatively — MechanicalToggle self-assigns checked on click,
-                    // breaking any QML binding. Updated via Connections below.
-                    property bool smartRotation: false
-
-                    Component.onCompleted: {
-                        var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
-                        if (vm) {
-                            installedLlmProvidersCard.smartRotation = vm.llm_smart_rotation
-                            _llmAdvSmartRotToggle.checked = vm.llm_smart_rotation
-                        }
-                    }
-
-                    Connections {
-                        target: (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
-                        function onLlm_smart_rotation_changed(val) {
-                            installedLlmProvidersCard.smartRotation = val
-                            _llmAdvSmartRotToggle.checked = val
-                        }
-                    }
+                    // Reactive binding to the shared viewmodel — the quick panel
+                    // (ModuleC) drives the same property, so the two panels always
+                    // agree. The toggle uses controlled `value:` mode below.
+                    property bool smartRotation: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                                  ? consoleViewModel.llm_smart_rotation : false
 
                     ColumnLayout {
                         id: installedLlmCol
@@ -2237,8 +2257,10 @@ Item {
                                 }
                                 MechanicalToggle {
                                     id: _llmAdvSmartRotToggle
-                                    // No checked: binding — managed imperatively via Component.onCompleted
-                                    // and Connections.onLlm_smart_rotation_changed above.
+                                    // Controlled by the shared viewmodel — stays in sync with
+                                    // the quick panel's smart-rotation toggle automatically.
+                                    value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                            ? consoleViewModel.llm_smart_rotation : false
                                     onToggled: {
                                         var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
                                         if (vm) vm.set_llm_smart_rotation(checked)
@@ -2362,7 +2384,9 @@ Item {
                                         }
 
                                         MechanicalToggle {
-                                            checked: modelData.enabled === true
+                                            // Controlled by the model so radio behaviour (rotation
+                                            // OFF → exactly one ON) can never desync the switches.
+                                            value: modelData.enabled === true
                                             onToggled: {
                                                 var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
                                                 if (vm) vm.set_llm_provider_enabled(modelData.id, checked)
@@ -2375,7 +2399,101 @@ Item {
                     }
                 }
 
-                Item { Layout.preferredHeight: 24 }
+                // ── GRAIN ASSIST MODEL ─────────────────────────────────────
+                // Which provider the select-text agent (Ctrl+Shift+G) uses.
+                // Independent of the rotation enable flags above — an explicit
+                // choice is honoured even if that provider isn't enabled for
+                // dictation processing.
+                SectionCard {
+                    id: grainAssistCard
+                    implicitHeight: grainAssistCol.implicitHeight + 32
+
+                    // Build the option list: "Auto" first, then every added LLM
+                    // provider. Reactive to the live provider list.
+                    readonly property var llmList:
+                        (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                            ? consoleViewModel.llm_providers : []
+                    readonly property var options: {
+                        var opts = [{ id: "", label: "Auto — first enabled provider" }]
+                        for (var i = 0; i < llmList.length; i++)
+                            opts.push({ id: llmList[i].id,
+                                        label: llmList[i].name + "  ·  " + llmList[i].model })
+                        return opts
+                    }
+                    function indexForId(id) {
+                        for (var i = 0; i < options.length; i++)
+                            if (options[i].id === id) return i
+                        return 0  // configured provider was deleted → Auto
+                    }
+
+                    ColumnLayout {
+                        id: grainAssistCol
+                        anchors { fill: parent; margins: 16 }
+                        spacing: 12
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "GRAIN ASSIST MODEL"
+                                font.family: "JetBrains Mono"; font.pixelSize: 10
+                                font.letterSpacing: 1.5; color: textGhost
+                                Layout.fillWidth: true
+                            }
+                            Text {
+                                text: "⌃⇧G"
+                                font.family: "JetBrains Mono"; font.pixelSize: 9
+                                font.letterSpacing: 1; color: textGhost
+                            }
+                        }
+
+                        Rectangle { Layout.fillWidth: true; height: 1; color: divider }
+
+                        Text {
+                            text: "The select-text agent uses this provider. Pick any one you've added — it doesn't have to be enabled for rotation above."
+                            font.family: "JetBrains Mono"; font.pixelSize: 9
+                            color: textGhost; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                        }
+
+                        ComboBox {
+                            id: grainAssistCombo
+                            Layout.fillWidth: true
+                            implicitHeight: 34
+                            model: grainAssistCard.options.map(function(o) { return o.label })
+                            currentIndex: grainAssistCard.indexForId(
+                                (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                    ? consoleViewModel.grain_assist_provider_id : "")
+                            onActivated: function(index) {
+                                var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
+                                if (vm && index >= 0 && index < grainAssistCard.options.length)
+                                    vm.save_grain_assist_provider(grainAssistCard.options[index].id)
+                            }
+                            // Re-sync if the provider list or selection changes elsewhere.
+                            Connections {
+                                target: (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
+                                function onGrain_assist_provider_changed() {
+                                    grainAssistCombo.currentIndex = grainAssistCard.indexForId(consoleViewModel.grain_assist_provider_id)
+                                }
+                                function onLlm_providers_changed() {
+                                    grainAssistCombo.currentIndex = grainAssistCard.indexForId(consoleViewModel.grain_assist_provider_id)
+                                }
+                            }
+                            background: Rectangle { radius: 6; color: surfaceInput; border.color: divider; border.width: 1 }
+                            contentItem: Text {
+                                leftPadding: 10; rightPadding: 28
+                                text: grainAssistCombo.displayText
+                                font.family: "JetBrains Mono"; font.pixelSize: 11
+                                color: textPrimary; verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+                }
+
+                // ════ PROMPTS & VOCABULARY ════
+                GroupHeader {
+                    title: "Prompts & Vocabulary"
+                    subtitle: "DIRECTIVE PROMPTS AND CUSTOM DICTIONARY"
+                }
 
                 // ── Directive Prompts ──────────────────────────
                 SectionCard {

@@ -24,12 +24,12 @@ datas = [
     # App icon — bundled so the tray can load it at runtime from sys._MEIPASS
     (str(ROOT / "open_voice_router" / "assets" / "grain.ico"), "open_voice_router/assets"),
 
-    # Local ASR server is spawned as a subprocess under the user's own venv
-    # Python (not the bundled interpreter), so it must live as a plain .py
-    # file that the venv Python can execute directly.
-    (str(ROOT / "open_voice_router" / "local_asr" / "server.py"),
-     "open_voice_router/local_asr"),
-    (str(ROOT / "open_voice_router" / "local_asr" / "requirements.txt"),
+    # Local ASR sidecar is spawned as a subprocess under the user's own venv
+    # Python (not the bundled interpreter), so it must live as plain .py
+    # files that the venv Python can execute directly. The whole tree is
+    # bundled: server.py (HTTP layer), registry.py (model catalog),
+    # engines/ (per-engine wrappers), requirements.txt (base deps).
+    (str(ROOT / "open_voice_router" / "local_asr"),
      "open_voice_router/local_asr"),
 ]
 
@@ -76,7 +76,9 @@ a = Analysis(
         "huggingface_hub",
     ],
     noarchive=False,
-    optimize=0,
+    # -O level 1: strips asserts/__debug__ blocks from all bundled bytecode.
+    # (Level 2 also strips docstrings but is riskier with numpy — not worth it.)
+    optimize=1,
 )
 
 pyz = PYZ(a.pure)

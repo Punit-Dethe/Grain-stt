@@ -3,12 +3,24 @@ import QtQuick 2.15
 
 Item {
     id: root
-    
+
     property bool checked: false
     property color activeColor: "#ff5d1e"
     // Track colour — themed by the caller (black on a light well, charcoal on a
     // dark well) so the switch reads correctly in both light and dark modes.
     property color trackColor: "#000000"
+
+    // ── Controlled mode (optional) ──────────────────────────────────────────
+    // Clicking self-assigns `checked`, which BREAKS a plain `checked:` binding
+    // to a model — after the first click the visual can desync from the source
+    // of truth (the classic "both toggles show ON" bug in a provider list).
+    // When the caller binds `value` to the authoritative state instead, we
+    // re-sync `checked` to it on every change (survives the self-assign), so
+    // the switch always reflects the model. Leave `value` unset for the legacy
+    // uncontrolled behaviour.
+    property var value: undefined
+    onValueChanged: if (value !== undefined) checked = (value === true)
+    Component.onCompleted: if (value !== undefined) checked = (value === true)
 
     signal toggled()
 

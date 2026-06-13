@@ -19,11 +19,11 @@ import numpy as np
 import pytest
 
 from open_voice_router.services import chunked_audio as ca
-from open_voice_router.services.chunked_audio import ChunkedAudioService
+from open_voice_router.services.chunked_audio import AudioChunk, ChunkedAudioService
 
 
-def _wav_frame_count(wav_bytes: bytes) -> int:
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+def _wav_frame_count(chunk: AudioChunk) -> int:
+    with wave.open(io.BytesIO(chunk.wav_bytes), "rb") as wf:
         return wf.getnframes()
 
 
@@ -41,7 +41,7 @@ def svc():
 
 def _collect_chunks(svc):
     """Attach a collector to the internal chunk signal. Returns the list."""
-    chunks: list[bytes] = []
+    chunks: list[AudioChunk] = []
     svc._chunk_ready_internal.connect(chunks.append)
     return chunks
 
@@ -140,3 +140,35 @@ def test_no_frames_dropped_across_chunk_and_stop(svc):
     # The tail must cover from cursor(12s) - overlap(2s) to 25s = 15s.
     tail_frames = _wav_frame_count(chunks[1])
     assert tail_frames == (25 - 12 + 2) * fps
+
+
+def test_chunks_carry_exact_timeline_metadata(svc):
+    """Each AudioChunk's time tags must match its true frame range, and the
+    fresh regions must tile the session with no gap and no overlap — the
+    invariant the time-based transcript assembler depends on."""
+    chunks = _collect_chunks(svc)
+    fps = ca._FRAMES_PER_SECOND
+
+    with svc._lock:
+        saved = [_block(fps) for _ in range(25)]
+        svc._all_blocks = saved[:12]
+        svc._total_frames = 12 * fps
+        svc._emit_chunk_locked()
+        svc._all_blocks = saved
+        svc._total_frames = 25 * fps
+    svc.stop()
+
+    first, tail = chunks
+    # First chunk: no overlap context exists yet — starts at 0.
+    assert first.start_sec == 0.0
+    assert first.fresh_start_sec == 0.0
+    assert first.end_sec == 12.0
+    # Tail: 2s overlap context before the cursor, fresh audio from 12s to 25s.
+    assert tail.start_sec == 12.0 - ca.OVERLAP_SECONDS
+    assert tail.fresh_start_sec == 12.0
+    assert tail.end_sec == 25.0
+    # Fresh regions tile the whole session exactly.
+    assert first.fresh_start_sec == 0.0 and tail.fresh_start_sec == first.end_sec
+    # WAV payload length matches the tagged range.
+    assert _wav_frame_count(first) == int((first.end_sec - first.start_sec) * fps)
+    assert _wav_frame_count(tail) == int((tail.end_sec - tail.start_sec) * fps)

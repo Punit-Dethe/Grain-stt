@@ -67,6 +67,52 @@ class ProviderConfig:
     enabled: bool = True  # Whether this provider participates in routing
 
 
+@dataclass(frozen=True)
+class WordTiming:
+    """A single transcribed word with chunk-relative timing in seconds."""
+
+    word: str
+    start: float
+    end: float
+
+    @property
+    def midpoint(self) -> float:
+        return (self.start + self.end) / 2.0
+
+
+@dataclass(frozen=True)
+class LLMResult:
+    """Structured LLM reply: the text plus live usage/limit signals.
+
+    ``total_tokens`` comes from the OpenAI-standard ``usage`` block;
+    ``remaining_requests`` / ``remaining_tokens`` come from the provider's
+    ``x-ratelimit-remaining-*`` headers (None when not sent). These feed the
+    smart-rotation tracker so it learns each provider's real headroom.
+    """
+
+    text: str
+    total_tokens: int | None = None
+    remaining_requests: int | None = None
+    remaining_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class TranscriptionResult:
+    """Normalized STT result returned by every provider adapter.
+
+    ``words`` is the optional word-level timing list (chunk-relative seconds).
+    Providers/models without word timestamps return ``words=None``; the
+    transcript assembler then falls back to text-based overlap merging.
+    """
+
+    text: str
+    words: tuple[WordTiming, ...] | None = None
+
+    @property
+    def has_word_timings(self) -> bool:
+        return bool(self.words)
+
+
 @dataclass
 class PromptConfig:
     """A named reusable system prompt for the processing layer."""
@@ -88,7 +134,7 @@ class AppSettings:
     llm_providers: list[ProviderConfig]
     log_file_path: str
     hotkey_ai: str = "ctrl+shift+enter"    # Ctrl+Shift+Enter → voice-to-AI
-    hotkey_grain: str = "ctrl+shift+g"    # Ctrl+Shift+G → Grain Assist (coming soon)
+    hotkey_grain: str = "ctrl+shift+g"    # Ctrl+Shift+G → Grain Assist (select text → instruct LLM)
     close_to_tray: bool = True             # False → closing window quits the app
     global_system_prompt: str = field(default_factory=lambda: DEFAULT_SYSTEM_PROMPT)
     prompts: list[PromptConfig] = field(default_factory=list)
@@ -103,6 +149,12 @@ class AppSettings:
     # quit), 0 = Instant (unload right after each session), positive = unload
     # after that many ms of idle. Enforced by the backend so it works headless.
     local_stt_unload_idle_ms: int = 300_000  # default: 5 minutes
+    # Selected local STT model — a registry id from
+    # open_voice_router/local_asr/registry.py. Unknown ids resolve to the
+    # registry default at load time, so a stale value degrades gracefully.
+    # (Literal default mirrors registry.DEFAULT_MODEL_ID; kept literal so this
+    # module stays import-light.)
+    local_stt_model_id: str = "parakeet-tdt-0.6b-v3"
     # Smart Rotation: when True, routing picks from ALL enabled cloud STT
     # providers in round-robin order. When False, only the single enabled
     # provider (local or cloud) is used.
@@ -110,6 +162,11 @@ class AppSettings:
     # Smart Rotation for LLM: when True, routing round-robins across all
     # enabled LLM providers. When False, only the single enabled provider is used.
     llm_smart_rotation: bool = False
+    # Grain Assist provider — the LLM provider id the agent workflow uses.
+    # Empty = auto (first enabled provider). Independent of the processing
+    # rotation's enabled flags: an explicit choice is honoured even if that
+    # provider is not enabled for dictation processing.
+    grain_assist_provider_id: str = ""
     # Console panel appearance — False = light (default), True = dark. Persisted
     # so the user's light/dark choice survives restarts.
     ui_dark_mode: bool = False
@@ -262,6 +319,18 @@ PROVIDER_PRESETS: dict[str, ProviderPreset] = {
         name="Anthropic",
         base_url="https://api.anthropic.com/v1",
         model="claude-3-5-sonnet-20241022",
+        provider_type="llm",
+    ),
+    "openrouter": ProviderPreset(
+        name="OpenRouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="meta-llama/llama-3.3-70b-instruct:free",
+        provider_type="llm",
+    ),
+    "mistral": ProviderPreset(
+        name="Mistral",
+        base_url="https://api.mistral.ai/v1",
+        model="mistral-small-latest",
         provider_type="llm",
     ),
 }

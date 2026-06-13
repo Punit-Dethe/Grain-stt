@@ -14,6 +14,7 @@ from sounddevice import PortAudioError
 from PySide6.QtCore import QObject, Qt, Signal
 
 from open_voice_router.exceptions import AudioDeviceError
+from open_voice_router.services.audio_conditioner import AudioConditioner, normalize_chunk
 
 # Audio capture constants
 SAMPLE_RATE = 16_000   # Hz — compatible with Deepgram and AssemblyAI
@@ -63,6 +64,11 @@ class AudioService(QObject):
         # Reduces jitter so the display feels fluid rather than jittery.
         self._smoothed_amplitude: float = 0.0
 
+        # Voice processing (Process Audio toggle): 85 Hz high-pass per block
+        # + noise-gated AGC on the final capture. Timing-exact.
+        self._conditioning_enabled: bool = True
+        self._conditioner = AudioConditioner(sample_rate=SAMPLE_RATE)
+
         # Wire internal signals → public signals with QueuedConnection so that
         # delivery always happens on the thread that owns this QObject (main).
         self._amplitude_ready.connect(
@@ -75,6 +81,10 @@ class AudioService(QObject):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def set_conditioning(self, enabled: bool) -> None:
+        """Enable/disable voice processing for the NEXT capture session."""
+        self._conditioning_enabled = bool(enabled)
 
     def start(self, device_id: int | None) -> None:
         """Begin audio capture on *device_id* (``None`` = system default).
@@ -89,6 +99,7 @@ class AudioService(QObject):
         self._chunks = []
         self._stop_event.clear()
         self._smoothed_amplitude = 0.0
+        self._conditioner.reset()
 
         try:
             self._stream = sd.InputStream(
@@ -188,13 +199,19 @@ class AudioService(QObject):
         Stores the raw PCM chunk and emits the RMS amplitude via the internal
         queued signal so it is delivered on the main Qt thread.
         """
+        # Voice processing stage 1: high-pass before storing, so the captured
+        # WAV is free of sub-vocal rumble and DC offset.
+        block = indata
+        if self._conditioning_enabled:
+            block = self._conditioner.process_block(indata)
+
         # Store raw bytes
-        chunk = indata.tobytes()
+        chunk = block.tobytes()
         with self._lock:
             self._chunks.append(chunk)
 
         # Compute RMS amplitude, normalised to 0.0–1.0 (int16 full-scale).
-        samples = indata.astype(np.float32) / 32768.0
+        samples = block.astype(np.float32) / 32768.0
         rms = float(np.sqrt(np.mean(samples ** 2)))
 
         # --- Noise floor gate ---
@@ -220,6 +237,11 @@ class AudioService(QObject):
         """Encode all collected PCM chunks as an in-memory WAV file."""
         with self._lock:
             chunks = list(self._chunks)
+
+        # Voice processing stage 2: noise-gated AGC over the whole capture.
+        if self._conditioning_enabled and chunks:
+            frames = [np.frombuffer(c, dtype=np.int16) for c in chunks]
+            chunks = [f.tobytes() for f in normalize_chunk(frames)]
 
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:

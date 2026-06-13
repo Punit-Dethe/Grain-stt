@@ -305,12 +305,12 @@ Rectangle {
 
                 Item { Layout.preferredHeight: 8 }
 
-                // ── SIDE-BY-SIDE SETTINGS (Sensitivity + Processing) ─────
+                // ── SIDE-BY-SIDE SETTINGS (Play Sound + Process Audio) ─────
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
 
-                    // Mic Sensitivity Box
+                    // Play Sound Box (replaces the old Mic Sensitivity dial)
                     Rectangle {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 74
@@ -323,49 +323,25 @@ Rectangle {
                             anchors.fill: parent
                             anchors.margins: 12
 
-                            // Left side text
                             ColumnLayout {
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: 2
-                                Text { text: "Mic Sensitivity"; font.pixelSize: 11; font.bold: true; color: theme.ink(0.85) }
-                                Text { text: "Gain calibration"; font.family: "JetBrains Mono"; font.pixelSize: 8; color: theme.ink(0.45) }
+                                Text { text: "Play Sound"; font.pixelSize: 11; font.bold: true; color: theme.ink(0.85) }
+                                Text { text: "Hotkey cues"; font.family: "JetBrains Mono"; font.pixelSize: 8; color: theme.ink(0.45) }
                             }
 
-                            // Right side dial + %
-                            ColumnLayout {
+                            MechanicalToggle {
+                                id: playSoundToggle
+                                trackColor: theme.toggleTrack
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
-                                spacing: 4
-
-                                Rectangle {
-                                    id: dialKnob
-                                    Layout.alignment: Qt.AlignHCenter
-                                    width: 24; height: 24; radius: 12
-                                    color: theme.dialKnob
-                                    border.color: theme.fill(0.12); border.width: 1
-                                    property real value: 45
-
-                                    Rectangle {
-                                        width: 3; height: 7; radius: 1.5; color: "#FF5D1E"
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        anchors.top: parent.top; anchors.topMargin: 2.5
-                                        transform: Rotation { origin.x: 1.5; origin.y: -2.5; angle: (dialKnob.value / 100) * 260 - 130 }
-                                    }
-                                    MouseArea {
-                                        anchors.fill: parent; cursorShape: Qt.SizeVerCursor
-                                        property real startY: 0; property real startVal: 0
-                                        onPressed: { startY = mouseY; startVal = dialKnob.value }
-                                        onPositionChanged: { dialKnob.value = Math.max(0, Math.min(100, startVal + (startY - mouseY) * 0.8)) }
-                                    }
-                                }
-
-                                Text {
-                                    id: sensitivityLabel
-                                    Layout.alignment: Qt.AlignHCenter
-                                    text: Math.round(dialKnob.value) + "%"
-                                    font.family: "JetBrains Mono"; font.pixelSize: 9; font.bold: true
-                                    color: theme.ink(0.8)
+                                // Controlled — mirrors the advanced panel's Play Sound toggle.
+                                value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        ? consoleViewModel.play_sound : true
+                                onToggled: {
+                                    if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        consoleViewModel.save_play_sound(checked)
                                 }
                             }
                         }
@@ -397,8 +373,9 @@ Rectangle {
                                 trackColor: theme.toggleTrack
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
-                                checked: (typeof consoleViewModel !== "undefined" && consoleViewModel)
-                                         ? consoleViewModel.process_audio : true
+                                // Controlled — mirrors the advanced panel's Process Audio toggle.
+                                value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        ? consoleViewModel.process_audio : true
                                 onToggled: {
                                     if (typeof consoleViewModel !== "undefined" && consoleViewModel)
                                         consoleViewModel.save_process_audio(checked)
@@ -443,8 +420,9 @@ Rectangle {
                         trackColor: theme.toggleTrack
                         anchors.right: parent.right; anchors.rightMargin: 12
                         anchors.verticalCenter: parent.verticalCenter
-                        checked: (typeof consoleViewModel !== "undefined" && consoleViewModel)
-                                 ? consoleViewModel.launch_on_boot : false
+                        // Controlled — mirrors the advanced panel's Launch on Boot toggle.
+                        value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                ? consoleViewModel.launch_on_boot : false
                         onToggled: {
                             if (typeof consoleViewModel !== "undefined" && consoleViewModel)
                                 consoleViewModel.save_launch_on_boot(checked)
@@ -454,7 +432,10 @@ Rectangle {
 
                 Item { Layout.preferredHeight: 8 }
 
-                // ── PLAY SOUND ON START/STOP ─────────────────────────────
+                // ── MINIMIZE TO SYSTEM TRAY ──────────────────────────────
+                // Replaces the old Play Sound row (Play Sound now lives beside
+                // Process Audio above). Mirrors the advanced panel's
+                // "Close to System Tray" toggle → consoleViewModel.close_to_tray.
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 52
@@ -467,20 +448,21 @@ Rectangle {
                         anchors.left: parent.left; anchors.leftMargin: 12
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 2
-                        Text { text: "Play Sound"; font.pixelSize: 11; font.bold: true; color: theme.ink(0.85) }
-                        Text { text: "Audible dictation cues"; font.family: "JetBrains Mono"; font.pixelSize: 8; color: theme.ink(0.45) }
+                        Text { text: "Minimize to System Tray"; font.pixelSize: 11; font.bold: true; color: theme.ink(0.85) }
+                        Text { text: "Close to tray instead of quitting"; font.family: "JetBrains Mono"; font.pixelSize: 8; color: theme.ink(0.45) }
                     }
 
                     MechanicalToggle {
-                        id: soundToggle
+                        id: trayToggle
                         trackColor: theme.toggleTrack
                         anchors.right: parent.right; anchors.rightMargin: 12
                         anchors.verticalCenter: parent.verticalCenter
-                        checked: (typeof consoleViewModel !== "undefined" && consoleViewModel)
-                                 ? consoleViewModel.play_sound : true
+                        // Controlled — mirrors the advanced panel's "Close to System Tray".
+                        value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                ? consoleViewModel.close_to_tray : true
                         onToggled: {
                             if (typeof consoleViewModel !== "undefined" && consoleViewModel)
-                                consoleViewModel.save_play_sound(checked)
+                                consoleViewModel.save_close_to_tray(checked)
                         }
                     }
                 }

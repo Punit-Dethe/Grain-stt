@@ -1,14 +1,17 @@
 """
-Vendored Groxaxo/Parakeet TDT 0.6B v3 ASR server.
+Open Voice Router — local ASR sidecar server.
 
-Source: https://github.com/groxaxo/parakeet-tdt-0.6b-v3-fastapi-openai
-License: MIT (open source)
+Engine-agnostic HTTP layer exposing an OpenAI-compatible
+``POST /v1/audio/transcriptions`` endpoint. The model to serve is selected via
+the MODEL_ID environment variable (set by LocalSTTManager) and resolved
+through the model registry (registry.py); the matching engine wrapper
+(engines/) performs inference. One process serves exactly one model.
 
-Vendored into Open Voice Router so users only need to install the ONNX model —
-no external git clone or separate install step required.
+Originally based on Groxaxo/parakeet-tdt-0.6b-v3-fastapi-openai (MIT).
 
 Configuration via environment variables (set by LocalSTTManager):
-  MODELS_DIR   — where onnx_asr stores/looks for model files
+  MODEL_ID     — registry id of the model to load (default: registry default)
+  MODELS_DIR   — where model files are stored/looked up (HF cache layout)
   PORT         — HTTP port (default 5092)
   HOST         — bind address (default 0.0.0.0)
 """
@@ -51,7 +54,7 @@ def _startup_marker(label: str) -> None:
 
 _startup_marker("process start")
 
-import os, sys, json, math, re, threading
+import os, json, math, re, threading
 import shutil
 import uuid
 import subprocess
@@ -66,25 +69,36 @@ from flask import Flask, request, jsonify, Response
 from waitress import serve
 from pathlib import Path
 
+# Sibling modules (registry, engines) — this script runs standalone inside the
+# sidecar venv, so its own directory must be importable.
+ROOT_DIR = str(Path(os.path.dirname(os.path.abspath(__file__))))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+import registry
+from engines import create_engine
+
 # Allow env override of port and host
 port = int(os.environ.get("PORT", port))
 host = os.environ.get("HOST", host)
 
-ROOT_DIR = str(Path(os.path.dirname(os.path.abspath(__file__))))
 MODELS_DIR = os.environ.get("MODELS_DIR", os.path.join(ROOT_DIR, "models"))
 os.environ["HF_HOME"] = MODELS_DIR
 os.environ["HF_HUB_CACHE"] = MODELS_DIR
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "true"
 
 # Honour the offline cache (R10.3): HF_HOME / HF_HUB_CACHE point at MODELS_DIR so
-# onnx_asr / huggingface_hub resolve the model from the local snapshot. When the
-# manager has set HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE (on-demand load with the
-# cache already present) we leave those flags untouched so no network HEAD request
-# is issued for cache-freshness. We do NOT force offline here, so the initial
-# install download path still works when the cache is absent.
+# the engines resolve models from the local snapshot. When the manager has set
+# HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE (on-demand load with the cache already
+# present) we leave those flags untouched so no network HEAD request is issued
+# for cache-freshness. We do NOT force offline here, so the initial install
+# download path still works when the cache is absent.
 _HF_OFFLINE = os.environ.get("HF_HUB_OFFLINE", "") in ("1", "true", "True")
+
+MODEL_SPEC = registry.get_model(os.environ.get("MODEL_ID"))
 _startup_marker(
-    f"hf cache resolved (models_dir={MODELS_DIR!r}, offline={_HF_OFFLINE})"
+    f"model resolved (id={MODEL_SPEC.id!r}, engine={MODEL_SPEC.engine!r}, "
+    f"models_dir={MODELS_DIR!r}, offline={_HF_OFFLINE})"
 )
 
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -121,34 +135,14 @@ def _physical_cpu_count() -> int:
     return _get_available_logical_cpus()
 
 
-def _detect_cpu_flags() -> set:
-    flags = set()
-    if sys.platform.startswith("linux"):
-        try:
-            with open("/proc/cpuinfo", "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if line.lower().startswith("flags"):
-                        _, value = line.split(":", 1)
-                        flags.update(value.strip().lower().split())
-        except OSError:
-            pass
-    return flags
-
-
-CPU_FLAGS = _detect_cpu_flags()
 CPU_OPTIMIZATION = {
     "available_logical_cpus": _get_available_logical_cpus(),
     "physical_cpus": _physical_cpu_count(),
-    "avx2_available": "avx2" in CPU_FLAGS,
-    "fma_available": "fma" in CPU_FLAGS,
 }
-default_ort_intra_threads = min(
+default_engine_threads = min(
     CPU_OPTIMIZATION["physical_cpus"], CPU_OPTIMIZATION["available_logical_cpus"]
 )
-CPU_OPTIMIZATION["ort_intra_op_threads"] = get_env_int(
-    "PARAKEET_ORT_INTRA_THREADS", default_ort_intra_threads
-)
-CPU_OPTIMIZATION["ort_inter_op_threads"] = get_env_int("PARAKEET_ORT_INTER_THREADS", 1)
+ENGINE_CPU_THREADS = get_env_int("ASR_ENGINE_THREADS", default_engine_threads)
 default_waitress_threads = min(
     MAX_WAITRESS_THREADS,
     max(1, CPU_OPTIMIZATION["available_logical_cpus"] // WAITRESS_CPU_DIVISOR),
@@ -162,77 +156,15 @@ for _thread_env in (
     os.environ.setdefault(_thread_env, "1")
 
 
-def build_session_options():
-    """Build ORT SessionOptions tuned for fast load and efficient CPU inference.
-
-    Uses ORT_ENABLE_EXTENDED rather than ORT_ENABLE_ALL.  The ALL level adds the
-    NchwcTransformer (a Windows-specific memory-layout pass) which takes ~2-3 s on
-    every cold start and whose output is never reused between process restarts because
-    ORT's optimized_model_filepath is write-only — it is not read back automatically
-    on subsequent sessions.  EXTENDED still applies operator fusion, constant folding,
-    and all other generic optimisations, so inference quality and throughput are
-    unchanged.
-    """
-    sess_options = ort.SessionOptions()
-    sess_options.intra_op_num_threads = CPU_OPTIMIZATION["ort_intra_op_threads"]
-    sess_options.inter_op_num_threads = CPU_OPTIMIZATION["ort_inter_op_threads"]
-    sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
-    sess_options.add_session_config_entry("session.set_denormal_as_zero", "1")
-    sess_options.add_session_config_entry("session.intra_op.allow_spinning", "1")
-    sess_options.add_session_config_entry("session.inter_op.allow_spinning", "0")
-    return sess_options
-
-
-def _load_model(hf_id: str, quantization, providers_to_try):
-    """Load an onnx_asr model with production-tuned session options."""
-    return onnx_asr.load_model(
-        hf_id,
-        quantization=quantization,
-        providers=providers_to_try,
-        sess_options=build_session_options(),
-    ).with_timestamps()
-
-
-def get_providers_to_try():
-    available_providers = ort.get_available_providers()
-    providers = []
-    if "TensorrtExecutionProvider" in available_providers:
-        providers.append("TensorrtExecutionProvider")
-    if "CUDAExecutionProvider" in available_providers:
-        providers.append("CUDAExecutionProvider")
-    providers.append("CPUExecutionProvider")
-    return available_providers, providers
-
-
-MODEL_CONFIGS = {
-    "parakeet-tdt-0.6b-v3": {
-        "hf_id": "nemo-parakeet-tdt-0.6b-v3",
-        "quantization": "int8",
-        "description": "INT8 (fastest, default)",
-    },
-    "istupakov/parakeet-tdt-0.6b-v3-onnx": {
-        "hf_id": "istupakov/parakeet-tdt-0.6b-v3-onnx",
-        "quantization": None,
-        "description": "FP32",
-    },
-    "grikdotnet/parakeet-tdt-0.6b-fp16": {
-        "hf_id": "grikdotnet/parakeet-tdt-0.6b-fp16",
-        "quantization": "fp16",
-        "description": "FP16",
-    },
-}
-
-model_cache = {}
-
 # -----------------------------------------------------------------------
 # Flask app — created HERE, before model loading, so Waitress can start
-# in parallel with onnx_asr.load_model().  The /health endpoint returns
-# 503 until _model_ready is set; the health poller in LocalSTTManager
+# in parallel with the engine load.  The /health endpoint returns 503
+# until _model_ready is set; the health poller in LocalSTTManager
 # will not signal server_ready until it sees a 200.
 # -----------------------------------------------------------------------
 
 _model_ready = threading.Event()
+_engine = None  # set by the startup code at the bottom of this file
 
 app = Flask(__name__)
 import tempfile as _tempfile
@@ -396,30 +328,35 @@ def segments_to_vtt(segments):
 @app.route("/health")
 def health():
     if not _model_ready.is_set():
-        return jsonify({"status": "loading"}), 503
-    return jsonify({"status": "healthy", "models": list(MODEL_CONFIGS.keys()), "default_model": "parakeet-tdt-0.6b-v3"})
+        return jsonify({"status": "loading", "model": MODEL_SPEC.id}), 503
+    return jsonify({
+        "status": "healthy",
+        "model": MODEL_SPEC.id,
+        "engine": MODEL_SPEC.engine,
+        "models": [MODEL_SPEC.id],
+        "default_model": MODEL_SPEC.id,
+    })
 
 
 @app.route("/docs")
 def docs():
-    return jsonify({"status": "ok", "info": "Parakeet TDT 0.6B V3 OpenAI-compatible ASR"})
+    return jsonify({
+        "status": "ok",
+        "info": f"Open Voice Router local ASR — {MODEL_SPEC.display_name} "
+                f"({MODEL_SPEC.engine}), OpenAI-compatible",
+    })
 
 
-def get_model(model_name):
-    if model_name not in MODEL_CONFIGS:
-        model_name = "parakeet-tdt-0.6b-v3"
-    if model_name in model_cache:
-        return model_cache[model_name]
-    config = MODEL_CONFIGS[model_name]
-    _, providers_to_try = get_providers_to_try()
-    model = _load_model(config["hf_id"], config["quantization"], providers_to_try)
-    model_cache[model_name] = model
-    return model
+def clean_text(text):
+    if not text:
+        return ""
+    text = text.replace("▁", " ").strip()
+    return re.sub(r"\s+", " ", text).replace(" '", "'")
 
 
 @app.route("/v1/audio/transcriptions", methods=["POST"])
 def transcribe_audio():
-    if not _model_ready.is_set():
+    if not _model_ready.is_set() or _engine is None:
         return jsonify({"error": "Model is still loading"}), 503
     if "file" not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
@@ -427,13 +364,13 @@ def transcribe_audio():
     if not file or not file.filename:
         return jsonify({"error": "No file selected"}), 400
 
-    model_name = request.form.get("model", "parakeet-tdt-0.6b-v3").lower()
+    # One process serves one model; a mismatched request is logged, not an
+    # error — OpenAI clients routinely send a model name the server maps.
+    requested_model = (request.form.get("model") or "").lower()
+    if requested_model and requested_model != MODEL_SPEC.id.lower():
+        print(f"Note: requested model {requested_model!r}; serving {MODEL_SPEC.id!r}")
     response_format = request.form.get("response_format", "json")
 
-    if model_name not in MODEL_CONFIGS:
-        model_name = "parakeet-tdt-0.6b-v3"
-
-    model_to_use = get_model(model_name)
     original_filename = secure_filename(file.filename)
     unique_id = str(uuid.uuid4())
     temp_original_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{unique_id}_{original_filename}")
@@ -478,66 +415,80 @@ def transcribe_audio():
         if total_duration == 0:
             return jsonify({"error": "Cannot process audio with 0 duration"}), 400
 
-        chunk_paths = []
-        split_points = []
+        # ------------------------------------------------------------------
+        # Build the list of waveforms to transcribe. Short uploads (the app's
+        # streaming chunks are <=25 s) go through as a single array; long
+        # uploads are split at silence into engine-sized pieces.
+        # ------------------------------------------------------------------
+        waveforms: list = []          # np.float32 mono 16 kHz arrays
+        piece_durations: list = []    # seconds, parallel to waveforms
 
-        if total_duration > CHUNK_DURATION_SECONDS:
-            silence_points = detect_silence_points(target_wav_path, total_duration=total_duration)
-            if silence_points:
-                split_points = find_optimal_split_points(total_duration, CHUNK_DURATION_SECONDS, silence_points)
-
-        if split_points:
-            chunk_boundaries = [0.0] + split_points + [total_duration]
-            num_chunks = len(chunk_boundaries) - 1
+        if direct_waveform is not None and total_duration <= CHUNK_DURATION_SECONDS:
+            waveforms.append(direct_waveform)
+            piece_durations.append(total_duration)
         else:
-            num_chunks = math.ceil(total_duration / CHUNK_DURATION_SECONDS)
-            chunk_boundaries = [min(i * CHUNK_DURATION_SECONDS, total_duration) for i in range(num_chunks + 1)]
+            split_points = []
+            if total_duration > CHUNK_DURATION_SECONDS:
+                silence_points = detect_silence_points(target_wav_path, total_duration=total_duration)
+                if silence_points:
+                    split_points = find_optimal_split_points(total_duration, CHUNK_DURATION_SECONDS, silence_points)
 
-        chunk_durations = [chunk_boundaries[i + 1] - chunk_boundaries[i] for i in range(num_chunks)]
+            if split_points:
+                chunk_boundaries = [0.0] + split_points + [total_duration]
+                num_chunks = len(chunk_boundaries) - 1
+            else:
+                num_chunks = max(1, math.ceil(total_duration / CHUNK_DURATION_SECONDS))
+                chunk_boundaries = [min(i * CHUNK_DURATION_SECONDS, total_duration) for i in range(num_chunks + 1)]
 
-        if num_chunks > 1:
+            chunk_durations = [chunk_boundaries[i + 1] - chunk_boundaries[i] for i in range(num_chunks)]
+
             for i in range(num_chunks):
-                chunk_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{unique_id}_chunk_{i}.wav")
-                chunk_paths.append(chunk_path)
-                temp_files_to_clean.append(chunk_path)
+                piece_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{unique_id}_chunk_{i}.wav")
+                temp_files_to_clean.append(piece_path)
                 chunk_command = [
                     "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
                     "-ss", str(chunk_boundaries[i]), "-t", str(chunk_durations[i]),
-                    "-i", target_wav_path, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", chunk_path,
+                    "-i", target_wav_path, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", piece_path,
                 ]
                 subprocess.run(chunk_command, capture_output=True, text=True)
-        else:
-            chunk_paths.append(direct_waveform if direct_waveform is not None else target_wav_path)
+                piece_info = get_wav_info(piece_path)
+                piece_wave = (
+                    load_pcm_wav_as_16k_float(piece_path, piece_info)
+                    if piece_info is not None else None
+                )
+                if piece_wave is not None:
+                    waveforms.append(piece_wave)
+                    piece_durations.append(chunk_durations[i])
 
+        # ------------------------------------------------------------------
+        # Transcribe each piece via the engine; offset times onto the upload's
+        # own timeline.
+        # ------------------------------------------------------------------
         all_segments = []
         all_words = []
         cumulative_time_offset = 0.0
 
-        def clean_text(text):
-            if not text:
-                return ""
-            text = text.replace("▁", " ").strip()
-            return re.sub(r"\s+", " ", text).replace(" '", "'")
-
-        for i, chunk_path in enumerate(chunk_paths):
-            result = model_to_use.recognize(chunk_path)
-            if result and result.text:
-                start_time = result.timestamps[0] if result.timestamps else 0
-                end_time = result.timestamps[-1] if len(result.timestamps) > 1 else start_time + 0.1
-                cleaned_text = clean_text(result.text)
+        for piece_wave, piece_duration in zip(waveforms, piece_durations):
+            engine_result = _engine.transcribe(piece_wave)
+            text = clean_text(engine_result.text)
+            if text:
+                if engine_result.words:
+                    seg_start = engine_result.words[0]["start"]
+                    seg_end = engine_result.words[-1]["end"]
+                else:
+                    seg_start, seg_end = 0.0, piece_duration
                 all_segments.append({
-                    "start": start_time + cumulative_time_offset,
-                    "end": end_time + cumulative_time_offset,
-                    "segment": cleaned_text,
+                    "start": seg_start + cumulative_time_offset,
+                    "end": seg_end + cumulative_time_offset,
+                    "segment": text,
                 })
-                for j, (token, timestamp) in enumerate(zip(result.tokens, result.timestamps)):
-                    word_end = result.timestamps[j + 1] if j < len(result.timestamps) - 1 else end_time
+                for w in engine_result.words:
                     all_words.append({
-                        "start": timestamp + cumulative_time_offset,
-                        "end": word_end + cumulative_time_offset,
-                        "word": token.replace("▁", " ").strip(),
+                        "word": w["word"],
+                        "start": round(w["start"] + cumulative_time_offset, 3),
+                        "end": round(w["end"] + cumulative_time_offset, 3),
                     })
-            cumulative_time_offset += chunk_durations[i]
+            cumulative_time_offset += piece_duration
 
         full_text = " ".join(seg["segment"] for seg in all_segments)
 
@@ -553,9 +504,10 @@ def transcribe_audio():
                 "duration": total_duration, "text": full_text,
                 "segments": [{"id": idx, "start": s["start"], "end": s["end"], "text": s["segment"]}
                               for idx, s in enumerate(all_segments)],
+                "words": all_words,
             })
         else:
-            return jsonify({"text": full_text})
+            return jsonify({"text": full_text, "words": all_words})
 
     except Exception as e:
         import traceback
@@ -572,13 +524,15 @@ def transcribe_audio():
 
 # -----------------------------------------------------------------------
 # Startup — Waitress starts in a background thread immediately so its
-# bind + thread-pool setup (~1.6 s) overlaps with onnx_asr model load
-# (~2.2 s).  Without this overlap the two phases were sequential, adding
-# ~1.6 s to the total time-to-ready.  The /health endpoint returns 503
-# until _model_ready is set, so the health poller never fires early.
+# bind + thread-pool setup (~1.6 s) overlaps with the engine's model load
+# (~2.2 s for Parakeet INT8).  Without this overlap the two phases were
+# sequential, adding ~1.6 s to the total time-to-ready.  The /health
+# endpoint returns 503 until _model_ready is set, so the health poller
+# never fires early.
 # -----------------------------------------------------------------------
 
-print(f"Open Voice Router — Local ASR Server")
+print("Open Voice Router — Local ASR Server")
+print(f"Model: {MODEL_SPEC.display_name} ({MODEL_SPEC.id}, engine={MODEL_SPEC.engine})")
 print(f"Endpoint: POST http://{host}:{port}/v1/audio/transcriptions")
 
 _waitress_thread = threading.Thread(
@@ -590,24 +544,13 @@ _waitress_thread.start()
 _startup_marker("waitress thread started (overlapping with model load)")
 
 try:
-    print("Initializing ONNX Runtime...")
-    import onnx_asr
-    import onnxruntime as ort
-
-    _startup_marker("after imports (onnx_asr + onnxruntime)")
-
-    available_providers, providers_to_try = get_providers_to_try()
-    print(f"Providers: {providers_to_try}")
-
-    _startup_marker("after session-options build")
-    default_config = MODEL_CONFIGS["parakeet-tdt-0.6b-v3"]
-    print("Loading Parakeet TDT 0.6B V3 INT8 model (downloading if needed)...")
-    asr_model = _load_model(
-        default_config["hf_id"],
-        default_config["quantization"],
-        providers_to_try,
+    print(f"Initializing {MODEL_SPEC.engine} engine...")
+    _engine = create_engine(
+        MODEL_SPEC, cpu_threads=ENGINE_CPU_THREADS, models_dir=MODELS_DIR
     )
-    model_cache["parakeet-tdt-0.6b-v3"] = asr_model
+    _startup_marker("after engine construction (imports deferred to load)")
+    print(f"Loading model {MODEL_SPEC.id} (downloading if needed)...")
+    _engine.load()
     _startup_marker("after model load")
     print("Model loaded.")
     _model_ready.set()
