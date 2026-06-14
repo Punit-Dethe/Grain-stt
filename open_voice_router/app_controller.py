@@ -38,7 +38,7 @@ from open_voice_router.storage.settings_store import SettingsStore
 from open_voice_router.ui.pill.pill_viewmodel import PillViewModel
 
 # Delay (ms) before the Pill UI is hidden after the DONE state is reached.
-_PILL_HIDE_DELAY_MS = 2000
+_PILL_HIDE_DELAY_MS = 120
 
 # Provider ID that triggers chunked-streaming mode
 _LOCAL_PROVIDER_ID = "local-parakeet"

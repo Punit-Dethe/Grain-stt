@@ -992,7 +992,26 @@ Item {
                         anchors { top: parent.top; left: parent.left; right: parent.right; margins: 16 }
                         spacing: 14
 
-                        SectionTitle { text: "OFFLINE ENGINE WEIGHTS" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            SectionTitle { text: "OFFLINE ENGINE WEIGHTS"; Layout.fillWidth: true }
+                            Text {
+                                text: "OPEN IN FOLDER"
+                                font.family: "JetBrains Mono"; font.pixelSize: 9
+                                font.bold: true; font.letterSpacing: 0.5
+                                color: openFolderHover.hovered ? Qt.lighter(orange, 1.3) : orange
+                                visible: offlineWeightsCard.liveStatus !== "not_installed"
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                                HoverHandler { id: openFolderHover }
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                            consoleViewModel.open_local_stt_folder()
+                                    }
+                                }
+                            }
+                        }
                         Rectangle { Layout.fillWidth: true; height: 1; color: divider }
 
                         // ── Active local model (from the registry) ─────────────────
@@ -1036,7 +1055,7 @@ Item {
                                             if (s === "running")    return "loaded · active"
                                             if (s === "starting")   return "starting server…"
                                             if (s === "installing") return "installing…"
-                                            if (s === "stopped")    return "installed · not loaded"
+                                            if (s === "stopped")    return (m && m.installed) ? "installed · not loaded" : "weights not downloaded · click START to download"
                                             if (s === "error")      return "error — see retry below"
                                             return "~" + ram + " RAM · downloads on first start"
                                         }
@@ -1078,7 +1097,7 @@ Item {
                                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                     onClicked: {
                                         if (typeof consoleViewModel !== "undefined" && consoleViewModel)
-                                            consoleViewModel.uninstall_local_stt()
+                                            consoleViewModel.delete_local_stt_model_cache(offlineWeightsCard.selectedModelId)
                                     }
                                 }
                             }
@@ -1179,7 +1198,12 @@ Item {
                         // Server-start message
                         Text {
                             visible: offlineWeightsCard.liveStatus === "starting"
-                            text: "Starting local STT server — the model loads on first launch (~30 s)."
+                            text: {
+                                var m = offlineWeightsCard.selectedModelEntry()
+                                return m && !m.installed
+                                    ? "Downloading model weights — first run may take several minutes depending on your connection."
+                                    : "Starting local STT server — loading model into memory (~30 s)."
+                            }
                             font.family: "JetBrains Mono"; font.pixelSize: 9
                             color: textMuted; Layout.fillWidth: true; wrapMode: Text.WordWrap
                         }
@@ -1292,6 +1316,40 @@ Item {
                                                     font.bold: true
                                                     font.letterSpacing: 0.5
                                                     color: installedBadge.isInstalled ? green : textMuted
+                                                }
+                                            }
+                                        }
+
+                                        // Delete button — only shown when weights are downloaded
+                                        Rectangle {
+                                            width: 28; height: 28; radius: 6
+                                            visible: modelData.installed === true
+                                            color: delRowHover.hovered ? Qt.rgba(0.8, 0.2, 0.2, 0.1) : "transparent"
+                                            Behavior on color { ColorAnimation { duration: 120 } }
+
+                                            Canvas {
+                                                anchors.centerIn: parent; width: 14; height: 14
+                                                onPaint: {
+                                                    var ctx = getContext("2d")
+                                                    ctx.clearRect(0, 0, width, height)
+                                                    ctx.strokeStyle = delRowHover.hovered ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.4)
+                                                    ctx.lineWidth = 1.5; ctx.lineCap = "round"
+                                                    ctx.strokeRect(2, 4, 10, 9)
+                                                    ctx.beginPath(); ctx.moveTo(1, 4); ctx.lineTo(13, 4); ctx.stroke()
+                                                    ctx.beginPath(); ctx.moveTo(5, 4); ctx.lineTo(5, 2); ctx.lineTo(9, 2); ctx.lineTo(9, 4); ctx.stroke()
+                                                }
+                                            }
+
+                                            HoverHandler {
+                                                id: delRowHover
+                                                onHoveredChanged: parent.children[0].requestPaint()
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                                        consoleViewModel.delete_local_stt_model_cache(modelData.id)
                                                 }
                                             }
                                         }

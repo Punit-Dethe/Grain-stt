@@ -1006,9 +1006,19 @@ class SettingsViewModel(QObject):
         """Stop the local STT server subprocess."""
         self._local_stt.stop()
 
+    @Slot(str)
+    def delete_local_stt_model_cache(self, model_id: str) -> None:
+        """Delete only the cached weights for *model_id* — venv stays intact.
+
+        The server is stopped first if it was running this model. The provider
+        registration is preserved so the user can re-download without
+        re-installing the whole venv.
+        """
+        self._local_stt.delete_model_cache(model_id)
+
     @Slot()
     def uninstall_local_stt(self) -> None:
-        """Stop the server and delete the venv + model data from disk.
+        """Stop the server and delete the venv + ALL model data from disk.
 
         Removes the local provider from the STT pool so it is no longer
         offered to the Router after uninstall.
@@ -1035,9 +1045,11 @@ class SettingsViewModel(QObject):
         if success:
             # Register the provider as soon as it is installed so it is
             # selectable even before/without the server running (R1.1, R1.2).
+            # NOTE: do NOT call self._local_stt.start() here — the manager's
+            # _on_install_finished already calls start() before emitting
+            # install_finished. A second start() here spawns a second server
+            # process that races for port 5092 and crashes.
             self._register_local_stt_provider()
-            # Auto-start after successful install
-            self._local_stt.start()
 
     def _on_local_stt_server_ready(self) -> None:
         """Register the local provider in the active STT pool.

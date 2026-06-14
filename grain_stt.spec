@@ -45,6 +45,10 @@ hidden = [
     "httpx._transports.default",
     "httpx._transports.asgi",
 
+    # keyboard: clipboard.py / selection.py use keyboard.send() and
+    # keyboard.is_pressed() for paste/copy automation — bundle the backend.
+    "keyboard._winkeyboard",
+
     # All open_voice_router submodules (belt-and-suspenders; analysis usually
     # catches these but listing them avoids surprises with lazy imports)
     *collect_submodules("open_voice_router"),
@@ -74,12 +78,67 @@ a = Analysis(
         "onnxruntime",
         "werkzeug",
         "huggingface_hub",
+        # Unused PySide6 / Qt modules — exclude the Python wrappers so their
+        # hooks don't pull the corresponding DLLs into the bundle.
+        "PySide6.QtWebEngineCore",
+        "PySide6.QtWebEngineWidgets",
+        "PySide6.QtWebEngineQuick",
+        "PySide6.Qt3DCore",
+        "PySide6.Qt3DRender",
+        "PySide6.Qt3DInput",
+        "PySide6.Qt3DAnimation",
+        "PySide6.Qt3DExtras",
+        "PySide6.Qt3DLogic",
+        "PySide6.QtQuick3D",
+        "PySide6.QtGraphs",
+        "PySide6.QtPdf",
+        "PySide6.QtPdfWidgets",
+        "PySide6.QtDataVisualization",
+        "PySide6.QtCharts",
+        "PySide6.QtLocation",
+        "PySide6.QtPositioning",
+        "PySide6.QtRemoteObjects",
+        "PySide6.QtScxml",
+        "PySide6.QtSensors",
+        "PySide6.QtStateMachine",
+        "PySide6.QtTextToSpeech",
+        "PySide6.QtVirtualKeyboard",
+        # PIL/Pillow — not used by this app; pulled in transitively
+        "PIL",
     ],
     noarchive=False,
     # -O level 1: strips asserts/__debug__ blocks from all bundled bytecode.
     # (Level 2 also strips docstrings but is riskier with numpy — not worth it.)
     optimize=1,
 )
+
+# ---------------------------------------------------------------------------
+# Drop Qt DLLs that were pulled in despite the excludes above.
+# PyInstaller's PySide6 hooks sometimes collect DLLs via dependency scanning
+# even when the Python wrapper module is excluded.  Belt-and-suspenders filter.
+# ---------------------------------------------------------------------------
+_QT_DLL_EXCLUDE_PREFIXES = (
+    "Qt6WebEngine",       # Chromium — 195 MB, not used
+    "Qt63D",              # 3D rendering, not used
+    "Qt6Quick3D",
+    "Qt6Graphs",
+    "Qt6Pdf",
+    "Qt6DataVisualization",
+    "Qt6Charts",
+    "Qt6Location",
+    "Qt6Positioning",
+    "Qt6RemoteObjects",
+    "Qt6Scxml",
+    "Qt6Sensors",
+    "Qt6StateMachine",
+    "Qt6TextToSpeech",
+    "Qt6VirtualKeyboard",
+    "opengl32sw",         # 20 MB software GL fallback — not needed
+)
+a.binaries = [
+    b for b in a.binaries
+    if not any(Path(b[0]).name.startswith(p) for p in _QT_DLL_EXCLUDE_PREFIXES)
+]
 
 pyz = PYZ(a.pure)
 

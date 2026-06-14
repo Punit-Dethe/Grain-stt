@@ -237,13 +237,17 @@ class AssistController(QObject):
         self._ready_conn = None
 
         # Transient GLOBAL shortcuts, live only while assist UI is on screen:
-        # Esc closes from anywhere; Ctrl+Shift+C copies the reply from anywhere
-        # (the panel rarely has keyboard focus — the user is usually still in
-        # the app they summoned assist over).
+        # Global shortcuts active while the assist UI is visible.
+        # The panel rarely has keyboard focus (user is still in their app),
+        # so these must be true global hotkeys, not window-focus key events.
         self._close_hotkey = HotkeyService(self)
         self._close_hotkey.hotkey_triggered.connect(self._on_global_escape)
         self._copy_hotkey = HotkeyService(self)
         self._copy_hotkey.hotkey_triggered.connect(self._on_global_copy)
+        # Enter stops voice recording and submits (or submits typed text when
+        # the palette has focus via QML onAccepted — both paths call submit_instruction).
+        self._enter_hotkey = HotkeyService(self)
+        self._enter_hotkey.hotkey_triggered.connect(self._on_global_enter)
         self._transient_hotkeys_active = False
 
         self._signals = _AssistSignals()
@@ -703,10 +707,12 @@ class AssistController(QObject):
         if should_be_active and not self._transient_hotkeys_active:
             self._close_hotkey.register("esc")
             self._copy_hotkey.register("ctrl+shift+c")
+            self._enter_hotkey.register("enter")
             self._transient_hotkeys_active = True
         elif not should_be_active and self._transient_hotkeys_active:
             self._close_hotkey.unregister()
             self._copy_hotkey.unregister()
+            self._enter_hotkey.unregister()
             self._transient_hotkeys_active = False
 
     @Slot()
@@ -720,6 +726,14 @@ class AssistController(QObject):
     def _on_global_copy(self) -> None:
         if self._panel_visible:
             self.copy_reply()
+
+    @Slot()
+    def _on_global_enter(self) -> None:
+        if self._palette_visible:
+            # Stops voice recording and transcribes it (or submits typed text
+            # if the palette happens to have focus — QML onAccepted fires first
+            # in that case, making this a no-op).
+            self.submit_instruction("")
 
     # ------------------------------------------------------------------
     # LLM dispatch

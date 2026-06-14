@@ -110,28 +110,34 @@ Window {
         var st = pillState
         var isProcessing = (st === "processing")
 
-        // Processing: unified diagonal sweep across every dot in the pill.
-        // Replaces the shuffle entirely — one white wave, bottom-left → top-right.
+        // Processing: randomized "static" sparkle across every dot in the pill.
+        // Each tick, every cell independently rolls a fresh state — a quick,
+        // lively scatter of orange / white / grey pixels lighting up at random.
+        // Replaces the old diagonal sweep wave.
         if (isProcessing) {
-            _btnAngle = (_btnAngle + 0.08) % (Math.PI * 2)
+            // Three shades of orange — bright/signature, mid, and deep/dark —
+            // each rolled with a random opacity. Lower opacity reads as a darker
+            // orange, so the scatter spans light → dark orange entirely.
             var procArr = new Array(rows * cols)
-            // Three bands, evenly spaced, sliding in one direction
-            var totalD  = 31.0
-            var spacing = totalD / 3.0
-            var lead    = (_btnAngle / (Math.PI * 2)) * totalD
             for (var pr = 0; pr < rows; pr++) {
                 for (var pc = 0; pc < cols; pc++) {
                     if (isEdgeCell(pc, pr)) continue
-                    var pd = pc + (7 - pr)      // diagonal coord 0–31
-                    var pBright = 0.0
-                    for (var wi = 0; wi < 3; wi++) {
-                        var wpos = (lead + wi * spacing) % totalD
-                        var dd = Math.abs(pd - wpos)
-                        dd = Math.min(dd, totalD - dd)  // wrap-around distance
-                        pBright = Math.max(pBright, Math.max(0.0, 1.0 - dd / 3.5))
+                    // Pick one of three orange shades at random.
+                    var shadeRoll = Math.random()
+                    var rgb
+                    if (shadeRoll < 0.40) {
+                        rgb = "255,93,30"       // base orange
+                    } else if (shadeRoll < 0.72) {
+                        rgb = "255,145,70"      // lighter orange
+                    } else {
+                        rgb = "255,185,110"     // pale/soft orange
                     }
-                    procArr[pr * cols + pc] =
-                        "rgba(255,93,30," + (0.03 + pBright * 0.93).toFixed(2) + ")"
+                    // Random opacity → bright vs. dark. ~25% of cells go bright
+                    // this frame, the rest sit at a low dim-orange flicker.
+                    var pa = (Math.random() < 0.25)
+                        ? (0.60 + Math.random() * 0.40)   // 0.60–1.0  bright
+                        : (0.08 + Math.random() * 0.22)   // 0.08–0.30 dim
+                    procArr[pr * cols + pc] = "rgba(" + rgb + "," + pa.toFixed(2) + ")"
                 }
             }
             dotStates = procArr

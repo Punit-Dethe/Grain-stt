@@ -563,13 +563,15 @@ class LocalSTTManager(QObject):
         if self.is_running():
             self.server_ready.emit()
             return
+        if self._status == "starting":
+            return  # spawn already in flight — ignore duplicate call
 
-        # Install-time / manual start: generous timeout because the model may still
-        # be downloading (~400 MB) and a relaxed poll interval is fine. The launch
-        # runs async (see _begin_spawn); a launch failure arrives via
-        # _on_spawn_finished → server_crashed.
+        # Install-time / manual start: very generous timeout because the model
+        # may still be downloading (~400 MB–1.5 GB) on a slow connection.
+        # 1800 s (30 min) covers the worst-case first-download scenario so a
+        # slow connection doesn't look like a crash to the user.
         self._begin_spawn(
-            timeout_s=300, interval_s=2.0, offline=False, check_cache=False
+            timeout_s=1800, interval_s=2.0, offline=False, check_cache=False
         )
 
     # ------------------------------------------------------------------
@@ -865,6 +867,40 @@ class LocalSTTManager(QObject):
 
         self._set_status("stopped")
         self.server_stopped.emit()
+
+    @Slot(str)
+    def delete_model_cache(self, model_id: str) -> None:
+        """Delete the cached weights for *model_id* without touching the venv.
+
+        If the currently-selected model is the one being deleted and the server
+        is running, the server is stopped first so the files are not locked.
+        After deletion the status is refreshed so the UI reflects the change.
+        """
+        import shutil
+
+        spec = registry.get_model(model_id)
+        if spec.id == self._spec.id and (self.is_running() or self._status in ("starting",)):
+            self.stop()
+
+        if not _MODELS_DIR.exists():
+            self.status_changed.emit(self._status)  # refresh UI installed flags
+            return
+
+        fragment = spec.cache_dir_fragment.lower()
+        try:
+            for directory in list(_MODELS_DIR.rglob("*")):
+                if not directory.is_dir():
+                    continue
+                if fragment and fragment not in directory.name.lower():
+                    continue
+                if next(directory.rglob(spec.cache_weight_glob), None) is not None:
+                    shutil.rmtree(directory, ignore_errors=True)
+        except Exception:
+            pass
+
+        # Always re-emit so the UI re-evaluates installed flags via
+        # local_stt_models_changed (connected to status_changed in the VM).
+        self.status_changed.emit(self._status)
 
     @Slot()
     def uninstall(self) -> None:

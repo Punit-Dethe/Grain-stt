@@ -133,7 +133,7 @@ Window {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
-                spacing: 12
+                spacing: 24
                 model: assistViewModel.chat_messages
                 boundsBehavior: Flickable.StopAtBounds
 
@@ -144,7 +144,7 @@ Window {
                 delegate: ColumnLayout {
                     id: msgDelegate
                     width: chatList.width - 10
-                    spacing: 5
+                    spacing: 4
                     readonly property bool isUser: modelData.role === "user"
 
                     Text {
@@ -156,14 +156,11 @@ Window {
                         color: msgDelegate.isUser ? inkA(0.4) : orange
                     }
 
-                    // User turns keep a subtle bubble; the AI reply has NO
-                    // background — it reads as a large, clean block of text on
-                    // the panel surface.
                     Rectangle {
                         Layout.fillWidth: true
                         Layout.preferredHeight: msgText.implicitHeight
-                                                + (msgDelegate.isUser ? 20 : 4)
-                        radius: 10
+                                                + (msgDelegate.isUser ? 28 : 8)
+                        radius: msgDelegate.isUser ? 10 : 0
                         color: msgDelegate.isUser ? surfaceRecess : "transparent"
                         border.color: msgDelegate.isUser ? inkA(0.10) : "transparent"
                         border.width: msgDelegate.isUser ? 1 : 0
@@ -172,19 +169,38 @@ Window {
                             id: msgText
                             anchors {
                                 fill: parent
-                                margins: msgDelegate.isUser ? 10 : 2
+                                leftMargin: 14
+                                rightMargin: 14
+                                topMargin: msgDelegate.isUser ? 14 : 12
+                                bottomMargin: msgDelegate.isUser ? 14 : 12
                             }
                             text: modelData.text
-                            // Bigger reply text overall; the AI reply slightly
-                            // larger than the user's for readability. Default
-                            // (system) font — matches the input field.
-                            font.pixelSize: msgDelegate.isUser ? 15 : 16
+                            textFormat: msgDelegate.isUser
+                                        ? TextEdit.PlainText
+                                        : TextEdit.MarkdownText
+                            font.pixelSize: 15
                             color: ink
                             wrapMode: TextEdit.Wrap
                             readOnly: true
                             selectByMouse: true
                             selectionColor: orange
                             selectedTextColor: "white"
+                            onLinkActivated: link => Qt.openUrlExternally(link)
+                            Component.onCompleted: {
+                                if (!msgDelegate.isUser)
+                                    textDocument.textDocument.defaultStyleSheet =
+                                        "body { line-height: 1.6; } " +
+                                        "p { margin: 0 0 10px 0; } " +
+                                        "h1, h2, h3 { margin: 12px 0 4px 0; } " +
+                                        "li { margin-bottom: 4px; } " +
+                                        "code { background-color: rgba(0,0,0,0.07); padding: 1px 4px; border-radius: 3px; }"
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.NoButton
+                                cursorShape: parent.hoveredLink ? Qt.PointingHandCursor
+                                                                : Qt.IBeamCursor
+                            }
                         }
                     }
                 }
