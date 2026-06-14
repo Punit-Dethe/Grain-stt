@@ -15,6 +15,7 @@ Window {
     readonly property color ink: "#141312"
     readonly property color orange: "#FF5D1E"
     readonly property color errorRed: "#C0392F"
+    // Ink-tinted alpha (text/borders) — dark ink on the light surface.
     function inkA(a) { return Qt.rgba(0.078, 0.075, 0.071, a) }
 
     width: 620
@@ -117,7 +118,7 @@ Window {
                 Layout.preferredHeight: 40
                 radius: 10
                 color: inputBg
-                border.color: instructionInput.activeFocus ? orange : inkA(0.15)
+                border.color: instructionInput.activeFocus ? ink : inkA(0.15)
                 border.width: instructionInput.activeFocus ? 2 : 1
                 Behavior on border.color { ColorAnimation { duration: 120 } }
 
@@ -156,67 +157,57 @@ Window {
                 // ── Bottom-left: recording wave grid  OR  Speak button ──────
                 Item {
                     Layout.alignment: Qt.AlignVCenter
-                    Layout.preferredWidth: Math.max(recGrid.width, speakBtn.width)
+                    Layout.preferredWidth: Math.max(recRipple.width, speakBtn.width)
                     Layout.preferredHeight: 22
 
-                    // 3 rows × 6 cols black "pixel" grid. Two soft diagonal
-                    // waves sweep bottom-left → top-right; a cell's opacity is
-                    // its brightness under the nearest wave (smooth, faded
-                    // edges), so it reads as two travelling bands of pixels.
+                    // Recording indicator — 4 × 12 dot grid, four corners removed.
+                    // A ruler-wave animation: bright crests radiate outward from the
+                    // centre left AND right simultaneously. Horizontal cosine bell
+                    // fades the edges to zero; vertical Gaussian dims the top/bottom
+                    // rows. Unlit cells (wave trough) are fully transparent.
                     Item {
-                        id: recGrid
+                        id: recRipple
                         anchors.verticalCenter: parent.verticalCenter
                         visible: assistViewModel.recording
-                        readonly property int cols: 6
-                        readonly property int rows: 3
-                        readonly property int cellSize: 5
+                        readonly property int rows: 4
+                        readonly property int cols: 12
+                        readonly property int cellSize: 4
                         readonly property int gap: 2
-                        width: cols * cellSize + (cols - 1) * gap
-                        height: rows * cellSize + (rows - 1) * gap
+                        width:  cols * cellSize + (cols - 1) * gap   // 70 px
+                        height: rows * cellSize + (rows - 1) * gap   // 22 px
 
-                        // Animated phase (0..1, looping) drives both waves.
-                        property real phase: 0.0
-                        NumberAnimation on phase {
-                            from: 0.0; to: 1.0
-                            duration: 1500
+                        // Phase angle drives the outward wave; one full cycle ≈ 2 s.
+                        property real angle: 0.0
+                        NumberAnimation on angle {
+                            from: 0.0; to: 2 * Math.PI
+                            duration: 2000
                             loops: Animation.Infinite
                             running: assistViewModel.recording
-                        }
-                        // Diagonal extent: d = col + (rows-1 - row) ranges 0..(cols-1)+(rows-1).
-                        readonly property int maxD: (cols - 1) + (rows - 1)
-                        readonly property real waveWidth: 1.7
-                        // Brightness at diagonal coord d from TWO waves half a
-                        // phase apart, each sweeping the full diagonal with a
-                        // little margin so they enter/exit off-grid.
-                        function brightnessFor(d) {
-                            var span = maxD + 2 * waveWidth
-                            var b = 0.0
-                            for (var k = 0; k < 2; k++) {
-                                var p = ((phase + k * 0.5) % 1.0) * span - waveWidth
-                                var dist = Math.abs(d - p)
-                                b = Math.max(b, Math.max(0.0, 1.0 - dist / waveWidth))
-                            }
-                            return b
                         }
 
                         Grid {
                             anchors.fill: parent
-                            columns: recGrid.cols
-                            rowSpacing: recGrid.gap
-                            columnSpacing: recGrid.gap
+                            columns: recRipple.cols
+                            rowSpacing: recRipple.gap
+                            columnSpacing: recRipple.gap
                             Repeater {
-                                model: recGrid.cols * recGrid.rows
+                                model: recRipple.rows * recRipple.cols
                                 Rectangle {
-                                    width: recGrid.cellSize
-                                    height: recGrid.cellSize
-                                    radius: 1.5
-                                    color: "#141312"   // black pixels
-                                    // d for this cell (bottom-left → top-right).
-                                    readonly property int _row: Math.floor(index / recGrid.cols)
-                                    readonly property int _col: index % recGrid.cols
-                                    readonly property int _d: _col + (recGrid.rows - 1 - _row)
-                                    // Faint floor + smooth wave crest.
-                                    opacity: 0.08 + recGrid.brightnessFor(_d) * 0.82
+                                    readonly property int _r: Math.floor(index / recRipple.cols)
+                                    readonly property int _c: index % recRipple.cols
+                                    readonly property bool _corner:
+                                        (_r === 0 || _r === recRipple.rows - 1) &&
+                                        (_c === 0 || _c === recRipple.cols - 1)
+                                    width: recRipple.cellSize
+                                    height: recRipple.cellSize
+                                    radius: width / 2
+                                    visible: !_corner
+                                    color: "#FF5D1E"
+                                    // Each dot gets a unique phase from prime-spaced offsets
+                                    // so they sparkle independently. Negative half of the sine
+                                    // cycle = fully transparent (no background tint).
+                                    opacity: Math.max(0, Math.sin(
+                                        recRipple.angle * 2.1 + _c * 1.37 + _r * 3.11))
                                 }
                             }
                         }
@@ -232,7 +223,7 @@ Window {
                         width: _speakRow.implicitWidth + 18
                         height: 22
                         radius: 11
-                        color: _speakHover.containsMouse ? inkA(0.10) : inkA(0.05)
+                        color: _speakHover.hovered ? inkA(0.10) : inkA(0.05)
                         border.color: inkA(0.18); border.width: 1
                         Behavior on color { ColorAnimation { duration: 120 } }
 

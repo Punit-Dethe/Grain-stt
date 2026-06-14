@@ -590,7 +590,7 @@ ApplicationWindow {
             onPaint: {
                 var ctx = getContext("2d")
                 ctx.clearRect(0, 0, width, height)
-                ctx.strokeStyle = iconHover.containsMouse ? root.brandOrange : theme.ink(0.55)
+                ctx.strokeStyle = iconHover.hovered ? root.brandOrange : theme.ink(0.55)
                 ctx.lineWidth = 1.5
                 ctx.lineCap = "round"
                 ctx.lineJoin = "round"

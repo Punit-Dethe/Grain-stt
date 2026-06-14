@@ -48,18 +48,22 @@ def merge_transcript(existing: str, new_segment: str) -> str:
     if not existing:
         return new_segment
 
-    existing_words = existing.split()
     new_words = new_segment.split()
 
     if not new_words:
         return existing
 
+    # Only the last _OVERLAP_SEARCH_WORDS of *existing* can overlap the new
+    # segment, so split just that tail rather than the whole transcript:
+    # rsplit(None, N) yields at most N+1 elements (the head collapsed into
+    # one), so its last N items are exactly the last N words — but without
+    # allocating a list of every word in a long, growing transcript each call.
+    tail_words = existing.rsplit(None, _OVERLAP_SEARCH_WORDS)[-_OVERLAP_SEARCH_WORDS:]
+
     # Normalized forms for comparison
-    existing_norm = [_normalize(w) for w in existing_words]
+    tail_norm = [_normalize(w) for w in tail_words]
     new_norm = [_normalize(w) for w in new_words]
 
-    # Take the last N words of existing as the candidate overlap tail
-    tail_norm = existing_norm[-_OVERLAP_SEARCH_WORDS:]
     search_limit = min(len(tail_norm), len(new_norm))
 
     # Find the longest prefix of new_norm that matches a suffix of tail_norm
@@ -147,7 +151,11 @@ class TimelineAssembler:
         # previous chunk already committed right at the boundary. Drop leading
         # accepted words that exactly repeat the committed tail AND sit inside
         # the tolerance window — never anything beyond it.
-        existing_words = self._text.split()
+        # Only the last _SEAM_SEARCH_WORDS committed words are ever compared, so
+        # split just that tail (rsplit-with-maxsplit) instead of the entire
+        # accumulated transcript — which otherwise allocated a full word list on
+        # every chunk, growing the main-thread cost quadratically over a session.
+        existing_words = self._text.rsplit(None, _SEAM_SEARCH_WORDS)
         for n in range(min(_SEAM_SEARCH_WORDS, len(accepted), len(existing_words)), 0, -1):
             head = accepted[:n]
             if any(

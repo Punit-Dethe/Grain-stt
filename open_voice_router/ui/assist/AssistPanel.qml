@@ -10,8 +10,8 @@ Window {
 
     // ── Theme (beige / mechanical, matching the console + website) ─────
     readonly property color surface: "#E8E1D4"
-    readonly property color surfaceRecess: "#DDD5C8"
-    readonly property color inputBg: "#F2ECE1"
+    readonly property color surfaceRecess: "#DDD5C8"  // user-message bubble
+    readonly property color inputBg: "#F2ECE1"        // input well
     readonly property color ink: "#141312"
     readonly property color orange: "#FF5D1E"
     readonly property color green: "#10B981"
@@ -19,7 +19,7 @@ Window {
     function inkA(a) { return Qt.rgba(0.078, 0.075, 0.071, a) }
 
     // Standardized footprint: fixed width, a bit less than display height.
-    width: 440
+    width: 500
     height: Math.min(Screen.desktopAvailableHeight - 72, 880)
     x: Screen.desktopAvailableWidth - width - 18
     y: Math.round((Screen.desktopAvailableHeight - height) / 2)
@@ -104,7 +104,7 @@ Window {
                     // Close button
                     Rectangle {
                         width: 22; height: 22; radius: 6
-                        color: closeHover.containsMouse ? inkA(0.08) : "transparent"
+                        color: closeHover.hovered ? inkA(0.08) : "transparent"
                         Text {
                             anchors.centerIn: parent
                             text: "×"; font.pixelSize: 15; color: inkA(0.55)
@@ -142,31 +142,43 @@ Window {
                 ScrollBar.vertical: ScrollBar { width: 6 }
 
                 delegate: ColumnLayout {
+                    id: msgDelegate
                     width: chatList.width - 10
-                    spacing: 4
+                    spacing: 5
+                    readonly property bool isUser: modelData.role === "user"
 
                     Text {
-                        text: modelData.role === "user" ? "YOU" : "GRAIN"
+                        text: msgDelegate.isUser ? "YOU" : "GRAIN"
                         font.family: "JetBrains Mono"
-                        font.pixelSize: 8
+                        font.pixelSize: 9
                         font.bold: true
                         font.letterSpacing: 1.4
-                        color: modelData.role === "user" ? inkA(0.4) : orange
+                        color: msgDelegate.isUser ? inkA(0.4) : orange
                     }
 
+                    // User turns keep a subtle bubble; the AI reply has NO
+                    // background — it reads as a large, clean block of text on
+                    // the panel surface.
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: msgText.implicitHeight + 20
+                        Layout.preferredHeight: msgText.implicitHeight
+                                                + (msgDelegate.isUser ? 20 : 4)
                         radius: 10
-                        color: modelData.role === "user" ? surfaceRecess : inputBg
-                        border.color: inkA(0.1)
-                        border.width: 1
+                        color: msgDelegate.isUser ? surfaceRecess : "transparent"
+                        border.color: msgDelegate.isUser ? inkA(0.10) : "transparent"
+                        border.width: msgDelegate.isUser ? 1 : 0
 
                         TextEdit {
                             id: msgText
-                            anchors { fill: parent; margins: 10 }
+                            anchors {
+                                fill: parent
+                                margins: msgDelegate.isUser ? 10 : 2
+                            }
                             text: modelData.text
-                            font.pixelSize: 12
+                            // Bigger reply text overall; the AI reply slightly
+                            // larger than the user's for readability. Default
+                            // (system) font — matches the input field.
+                            font.pixelSize: msgDelegate.isUser ? 15 : 16
                             color: ink
                             wrapMode: TextEdit.Wrap
                             readOnly: true
@@ -201,7 +213,7 @@ Window {
                     id: copyBtn
                     width: 110; height: 30; radius: 8
                     color: copyFlash.running ? green
-                         : (copyHover.containsMouse ? Qt.rgba(1, 0.365, 0.118, 0.9) : orange)
+                         : (copyHover.hovered ? inkA(0.75) : ink)
                     Behavior on color { ColorAnimation { duration: 150 } }
 
                     Text {
@@ -247,7 +259,7 @@ Window {
                 Layout.preferredHeight: 42
                 radius: 10
                 color: inputBg
-                border.color: followupInput.activeFocus ? orange : inkA(0.15)
+                border.color: followupInput.activeFocus ? ink : inkA(0.15)
                 border.width: followupInput.activeFocus ? 2 : 1
                 Behavior on border.color { ColorAnimation { duration: 120 } }
 
@@ -277,9 +289,9 @@ Window {
 
                     Rectangle {
                         width: 30; height: 30; radius: 8
-                        color: sendHover.containsMouse && !assistViewModel.busy
-                               ? Qt.rgba(1, 0.365, 0.118, 0.9)
-                               : (assistViewModel.busy ? inkA(0.1) : orange)
+                        color: sendHover.hovered && !assistViewModel.busy
+                               ? inkA(0.75)
+                               : (assistViewModel.busy ? inkA(0.1) : ink)
                         Text {
                             anchors.centerIn: parent
                             text: "↵"; font.pixelSize: 13; font.bold: true

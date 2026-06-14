@@ -12,18 +12,23 @@ Rectangle {
     property var theme
 
     // ── Computed lists from backend ──────────────────────────────────────
-    property var promptNames: {
+    // Prompts marshalled from Python ONCE per change; promptNames and
+    // activePromptIndex derive from this already-converted array instead of
+    // each re-reading consoleViewModel.prompts (which pulls every prompt's full
+    // text across the Python->QML boundary).
+    property var prompts: {
         var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
-        if (!vm || !vm.prompts || vm.prompts.length === 0) return ["No prompts"]
+        return (vm && vm.prompts) ? vm.prompts : []
+    }
+    property var promptNames: {
+        if (root.prompts.length === 0) return ["No prompts"]
         var names = []
-        for (var i = 0; i < vm.prompts.length; i++) names.push(vm.prompts[i].name)
+        for (var i = 0; i < root.prompts.length; i++) names.push(root.prompts[i].name)
         return names
     }
     property int activePromptIndex: {
-        var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
-        if (!vm || !vm.prompts) return 0
-        for (var i = 0; i < vm.prompts.length; i++)
-            if (vm.prompts[i].is_active) return i
+        for (var i = 0; i < root.prompts.length; i++)
+            if (root.prompts[i].is_active) return i
         return 0
     }
     // All LLM providers — no cloud/custom split
@@ -292,7 +297,7 @@ Rectangle {
 
                                         Rectangle {
                                             height: 22; width: _wLabel.implicitWidth + 16; radius: 5
-                                            color: _chipH.containsMouse === true ? theme.fill(0.08) : theme.fill(0.05)
+                                            color: _chipH.hovered === true ? theme.fill(0.08) : theme.fill(0.05)
                                             border.color: theme.fill(0.08); border.width: 1
                                             Behavior on color { ColorAnimation { duration: 100 } }
                                             HoverHandler { id: _chipH }
@@ -309,8 +314,8 @@ Rectangle {
 
                                                 Text {
                                                     text: "×"; font.pixelSize: 11
-                                                    color: _chipH.containsMouse === true ? theme.ink(0.7) : theme.ink(0.3)
-                                                    visible: _chipH.containsMouse === true
+                                                    color: _chipH.hovered === true ? theme.ink(0.7) : theme.ink(0.3)
+                                                    visible: _chipH.hovered === true
                                                     Behavior on color { ColorAnimation { duration: 100 } }
                                                     MouseArea {
                                                         anchors.fill: parent; anchors.margins: -3

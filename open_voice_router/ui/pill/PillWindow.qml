@@ -7,6 +7,7 @@
 // entire lifetime (~4+ MB measured). Plain Window has everything we need.
 import QtQuick
 import QtQuick.Window
+import QtQuick.Effects
 
 Window {
     id: root
@@ -19,8 +20,15 @@ Window {
     readonly property int gap:  2      // gap between dots (same as original)
     readonly property int cell: dotD + gap   // 5px per cell
 
+    // Height of the dot-grid pill body itself (unchanged from the original).
+    readonly property int pillBodyHeight: rows * cell + 2
+    // Extra space reserved ABOVE the pill so the prompt "riser" can slide up
+    // out of it. The window grows by this much and shifts up by the same
+    // amount (see y below), so the pill body stays in its exact prior place.
+    readonly property int riserReserve: 32
+
     width:  cols * cell + 2
-    height: rows * cell + 2
+    height: pillBodyHeight + riserReserve
 
     // Button zone: 4x4 at right side, 3 cols from right edge
     // Cols 18–21, rows 2–5
@@ -305,32 +313,167 @@ Window {
             energy = 0.0
             dotCanvas.requestPaint()
         }
+        // The prompt riser only makes sense while actively recording — once we
+        // leave recording/streaming (stop, processing, idle) snap it away.
+        if (pillState !== "recording" && pillState !== "streaming") {
+            promptRiser.shown = false
+            riserHideTimer.stop()
+        }
     }
 
-    // ----------------------------------------------------------------
-    // Dark pill background — full height, width trimmed to the visible
-    // dot columns (cols 1–23), one cell inset on each side.
-    // ----------------------------------------------------------------
-    Rectangle {
+    // ================================================================
+    // Prompt-profile RISER
+    // A SECOND pill, the SAME width as the main pill, that slides up from
+    // behind it — only its top crescent shows, carrying the active prompt
+    // name with ‹ / › chevrons. Declared BEFORE pillBody so the opaque main
+    // pill draws on top of it; the riser's lower half is fully hidden behind
+    // the pill (identical width → no edges peek out), and the pill casts a
+    // soft shadow onto it at the seam (seamShadow below). Auto-retracts a
+    // moment after the last switch.
+    // ================================================================
+    Item {
+        id: promptRiser
+
+        property bool shown: false
+
+        // Same x / width as the main pill so they share a footprint.
         x: root.cell - 2
-        y: 0
         width:  (root.cols - 2) * root.cell + 5
-        height: parent.height
-        color: "#000000"
-        radius: height / 2
-        border.color: "#1a1a1a"
-        border.width: 1
+
+        // Visible crescent height above the pill.
+        readonly property int _peek: 22
+        // The bottom reaches the pill's 50% mark (its widest point). With SQUARE
+        // bottom corners (below), that lower edge is swallowed by the full-width
+        // middle of the pill, so nothing curved ever pokes past its rounded ends.
+        height: _peek + root.pillBodyHeight / 2
+
+        readonly property int _hiddenY: root.riserReserve            // fully behind the pill
+        readonly property int _shownY: root.riserReserve - _peek      // crescent peeking out
+        y: shown ? _shownY : _hiddenY
+        opacity: shown ? 1.0 : 0.0
+
+        Behavior on y       { NumberAnimation { duration: 230; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: 170; easing.type: Easing.InOutQuad } }
+
+        // Rounded TOP corners — the visible crescent.
+        Rectangle {
+            anchors.fill: parent
+            radius: 13
+            color: "#0b0b0a"
+            border.color: "#1c1c1c"
+            border.width: 1
+        }
+        // SQUARE bottom corners — a flat-cornered panel over the lower portion
+        // (hidden behind the pill) so the bottom-left/right are not rounded.
+        Rectangle {
+            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+            height: parent.height - 13
+            color: "#0b0b0a"
+        }
+
+        // Content lives in the VISIBLE crescent only (above the pill).
+        Item {
+            anchors { top: parent.top; left: parent.left; right: parent.right }
+            anchors.topMargin: 1
+            height: promptRiser._peek
+
+            Text {
+                anchors { left: parent.left; leftMargin: 11; verticalCenter: parent.verticalCenter }
+                text: "‹"
+                font.family: "JetBrains Mono"
+                font.pixelSize: 14
+                color: Qt.rgba(1.0, 0.365, 0.118, 0.9)
+            }
+
+            Text {
+                anchors.centerIn: parent
+                text: pillViewModel ? pillViewModel.active_prompt_name : ""
+                elide: Text.ElideRight
+                width: parent.width - 40
+                horizontalAlignment: Text.AlignHCenter
+                font.family: "JetBrains Mono"
+                font.pixelSize: 10
+                font.letterSpacing: 0.4
+                color: "#ECE5DA"
+            }
+
+            Text {
+                anchors { right: parent.right; rightMargin: 11; verticalCenter: parent.verticalCenter }
+                text: "›"
+                font.family: "JetBrains Mono"
+                font.pixelSize: 14
+                color: Qt.rgba(1.0, 0.365, 0.118, 0.9)
+            }
+        }
     }
 
-    // ----------------------------------------------------------------
-    // Canvas — single paint call for all dots
-    // ----------------------------------------------------------------
-    Canvas {
-        id: dotCanvas
-        anchors.fill: parent
-        renderStrategy: Canvas.Threaded
+    // Auto-hide timer — restarted on every prompt switch.
+    Timer {
+        id: riserHideTimer
+        interval: 1600
+        onTriggered: promptRiser.shown = false
+    }
 
-        onPaint: {
+    // Reveal the riser whenever the controller reports a prompt switch, but
+    // only while actually recording (the controller already guards this too).
+    Connections {
+        target: pillViewModel
+        function onPrompt_nav_pulse() {
+            if (root.pillState === "recording" || root.pillState === "streaming") {
+                promptRiser.shown = true
+                riserHideTimer.restart()
+            }
+        }
+    }
+
+    // ================================================================
+    // PILL BODY — the dot-grid pill itself. Bottom-anchored so the
+    // reserved riser space sits above it and the pill keeps its exact
+    // prior on-screen position.
+    // ================================================================
+    Item {
+        id: pillBody
+        width: parent.width
+        height: root.pillBodyHeight
+        anchors.bottom: parent.bottom
+
+        // Drop shadow the pill casts upward onto the riser. Only active while
+        // the riser is visible; fades in/out with it via promptRiser.opacity.
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            autoPaddingEnabled: true
+            shadowEnabled: true
+            shadowColor: "#4a4a4a"
+            shadowOpacity: promptRiser.opacity * 0.28
+            shadowBlur: 1.0
+            shadowVerticalOffset: -5
+            shadowHorizontalOffset: 0
+        }
+
+        // ----------------------------------------------------------------
+        // Dark pill background — full height, width trimmed to the visible
+        // dot columns (cols 1–23), one cell inset on each side.
+        // ----------------------------------------------------------------
+        Rectangle {
+            x: root.cell - 2
+            y: 0
+            width:  (root.cols - 2) * root.cell + 5
+            height: parent.height
+            color: "#000000"
+            radius: height / 2
+            border.color: "#1a1a1a"
+            border.width: 1
+        }
+
+        // ----------------------------------------------------------------
+        // Canvas — single paint call for all dots
+        // ----------------------------------------------------------------
+        Canvas {
+            id: dotCanvas
+            anchors.fill: parent
+            renderStrategy: Canvas.Threaded
+
+            onPaint: {
             var ctx = getContext("2d")
             ctx.clearRect(0, 0, width, height)
 
@@ -367,21 +510,22 @@ Window {
         }
     }
 
-    // ----------------------------------------------------------------
-    // Confirm button — invisible click zone over button grid
-    // ----------------------------------------------------------------
-    Item {
-        x: root.btnCol  * root.cell + 1
-        y: root.btnRow  * root.cell + 1
-        width:  root.btnSpan * root.cell
-        height: root.btnSpan * root.cell
+        // ----------------------------------------------------------------
+        // Confirm button — invisible click zone over button grid
+        // ----------------------------------------------------------------
+        Item {
+            x: root.btnCol  * root.cell + 1
+            y: root.btnRow  * root.cell + 1
+            width:  root.btnSpan * root.cell
+            height: root.btnSpan * root.cell
 
-        visible: root.pillState === "recording" || root.pillState === "streaming" || root.pillState === "processing"
+            visible: root.pillState === "recording" || root.pillState === "streaming" || root.pillState === "processing"
 
-        MouseArea {
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: { if (pillViewModel) pillViewModel.on_confirm_clicked() }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { if (pillViewModel) pillViewModel.on_confirm_clicked() }
+            }
         }
     }
 }

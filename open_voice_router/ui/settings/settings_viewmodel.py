@@ -88,6 +88,9 @@ class SettingsViewModel(QObject):
     hotkey_changed = Signal(str)
     hotkey_ai_changed = Signal(str)
     hotkey_grain_changed = Signal(str)
+    hotkey_batch_changed = Signal(str)
+    hotkey_prompt_prev_changed = Signal(str)
+    hotkey_prompt_next_changed = Signal(str)
     microphone_device_id_changed = Signal(int)
     available_microphones_changed = Signal()
     microphone_combo_index_changed = Signal(int)
@@ -104,6 +107,7 @@ class SettingsViewModel(QObject):
     word_dictionary_changed = Signal()
 
     stt_smart_rotation_changed = Signal(bool)
+    rolling_window_s_changed = Signal(int)
     stt_local_enabled_changed = Signal(bool)
     llm_smart_rotation_changed = Signal(bool)
     grain_assist_provider_changed = Signal(str)
@@ -116,6 +120,7 @@ class SettingsViewModel(QObject):
     local_stt_install_progress = Signal(str)
     local_stt_install_finished = Signal(bool, str)
     local_stt_unload_idle_changed = Signal(int)
+    local_stt_load_on_startup_changed = Signal(bool)
     local_stt_model_changed = Signal(str)
     # Fired when the model catalog's volatile bits (installed flags) may have
     # changed — after installs, status transitions, or a model switch.
@@ -140,6 +145,9 @@ class SettingsViewModel(QObject):
         self._hotkey: str = self._settings.hotkey
         self._hotkey_ai: str = self._settings.hotkey_ai
         self._hotkey_grain: str = self._settings.hotkey_grain
+        self._hotkey_batch: str = self._settings.hotkey_batch
+        self._hotkey_prompt_prev: str = self._settings.hotkey_prompt_prev
+        self._hotkey_prompt_next: str = self._settings.hotkey_prompt_next
         self._microphone_device_id: int = (
             self._settings.microphone_device_id
             if self._settings.microphone_device_id is not None
@@ -193,6 +201,9 @@ class SettingsViewModel(QObject):
         self._set_hotkey(self._settings.hotkey)
         self._set_hotkey_ai(self._settings.hotkey_ai)
         self._set_hotkey_grain(self._settings.hotkey_grain)
+        self._set_hotkey_batch(self._settings.hotkey_batch)
+        self._set_hotkey_prompt_prev(self._settings.hotkey_prompt_prev)
+        self._set_hotkey_prompt_next(self._settings.hotkey_prompt_next)
         self._set_microphone_device_id(
             self._settings.microphone_device_id
             if self._settings.microphone_device_id is not None
@@ -257,6 +268,13 @@ class SettingsViewModel(QObject):
             hotkey=overrides.get("hotkey", self._settings.hotkey),
             hotkey_ai=overrides.get("hotkey_ai", self._settings.hotkey_ai),
             hotkey_grain=overrides.get("hotkey_grain", self._settings.hotkey_grain),
+            hotkey_batch=overrides.get("hotkey_batch", self._settings.hotkey_batch),
+            hotkey_prompt_prev=overrides.get(
+                "hotkey_prompt_prev", self._settings.hotkey_prompt_prev
+            ),
+            hotkey_prompt_next=overrides.get(
+                "hotkey_prompt_next", self._settings.hotkey_prompt_next
+            ),
             close_to_tray=overrides.get("close_to_tray", self._settings.close_to_tray),
             microphone_device_id=overrides.get(
                 "microphone_device_id", self._settings.microphone_device_id
@@ -279,8 +297,14 @@ class SettingsViewModel(QObject):
             local_stt_unload_idle_ms=overrides.get(
                 "local_stt_unload_idle_ms", self._settings.local_stt_unload_idle_ms
             ),
+            local_stt_load_on_startup=overrides.get(
+                "local_stt_load_on_startup", self._settings.local_stt_load_on_startup
+            ),
             local_stt_model_id=overrides.get(
                 "local_stt_model_id", self._settings.local_stt_model_id
+            ),
+            rolling_window_s=overrides.get(
+                "rolling_window_s", self._settings.rolling_window_s
             ),
             stt_smart_rotation=overrides.get(
                 "stt_smart_rotation", self._settings.stt_smart_rotation
@@ -384,6 +408,66 @@ class SettingsViewModel(QObject):
         self._settings = self._updated_settings(hotkey_grain=hotkey)
         self._settings_store.save(self._settings)
         self._set_hotkey_grain(hotkey)
+        self.settings_changed.emit()
+
+    # ------------------------------------------------------------------
+    # hotkey_batch  (non-real-time / record-then-transcribe session)
+    # ------------------------------------------------------------------
+
+    @Property(str, notify=hotkey_batch_changed)
+    def hotkey_batch(self) -> str:
+        return self._hotkey_batch
+
+    def _set_hotkey_batch(self, value: str) -> None:
+        if self._hotkey_batch != value:
+            self._hotkey_batch = value
+            self.hotkey_batch_changed.emit(value)
+
+    @Slot(str)
+    def save_hotkey_batch(self, hotkey: str) -> None:
+        """Persist the batch (non-real-time) dictation hotkey binding."""
+        self._settings = self._updated_settings(hotkey_batch=hotkey)
+        self._settings_store.save(self._settings)
+        self._set_hotkey_batch(hotkey)
+        self.settings_changed.emit()
+
+    # ------------------------------------------------------------------
+    # hotkey_prompt_prev / hotkey_prompt_next  (cycle active prompt profile
+    # while recording in Voice-to-AI mode)
+    # ------------------------------------------------------------------
+
+    @Property(str, notify=hotkey_prompt_prev_changed)
+    def hotkey_prompt_prev(self) -> str:
+        return self._hotkey_prompt_prev
+
+    def _set_hotkey_prompt_prev(self, value: str) -> None:
+        if self._hotkey_prompt_prev != value:
+            self._hotkey_prompt_prev = value
+            self.hotkey_prompt_prev_changed.emit(value)
+
+    @Slot(str)
+    def save_hotkey_prompt_prev(self, hotkey: str) -> None:
+        """Persist the 'previous prompt' navigation hotkey binding."""
+        self._settings = self._updated_settings(hotkey_prompt_prev=hotkey)
+        self._settings_store.save(self._settings)
+        self._set_hotkey_prompt_prev(hotkey)
+        self.settings_changed.emit()
+
+    @Property(str, notify=hotkey_prompt_next_changed)
+    def hotkey_prompt_next(self) -> str:
+        return self._hotkey_prompt_next
+
+    def _set_hotkey_prompt_next(self, value: str) -> None:
+        if self._hotkey_prompt_next != value:
+            self._hotkey_prompt_next = value
+            self.hotkey_prompt_next_changed.emit(value)
+
+    @Slot(str)
+    def save_hotkey_prompt_next(self, hotkey: str) -> None:
+        """Persist the 'next prompt' navigation hotkey binding."""
+        self._settings = self._updated_settings(hotkey_prompt_next=hotkey)
+        self._settings_store.save(self._settings)
+        self._set_hotkey_prompt_next(hotkey)
         self.settings_changed.emit()
 
     # ------------------------------------------------------------------
@@ -702,14 +786,18 @@ class SettingsViewModel(QObject):
             result = []
             for p in providers:
                 if p.id == provider_id:
+                    # Preserve kind + enabled (and quota usage): an edit changes
+                    # only the user-facing fields, never the routing state. A
+                    # plain ProviderConfig(...) would silently reset kind→"cloud"
+                    # and enabled→True, dropping a custom endpoint out of its
+                    # category and re-enabling a provider the user had turned off.
                     result.append(
-                        ProviderConfig(
-                            id=provider_id,
+                        dataclasses.replace(
+                            p,
                             name=name,
                             base_url=base_url,
                             model=model,
                             quota_limit=None if quota_limit == -1 else quota_limit,
-                            quota_used_today=p.quota_used_today,
                             system_prompt=system_prompt or None,
                         )
                     )
@@ -827,6 +915,26 @@ class SettingsViewModel(QObject):
         self.local_stt_unload_idle_changed.emit(int(value))
         self.settings_changed.emit()
 
+    @Property(bool, notify=local_stt_load_on_startup_changed)
+    def local_stt_load_on_startup(self) -> bool:
+        """Whether the selected local model is pre-loaded at app launch."""
+        return self._settings.local_stt_load_on_startup
+
+    @Slot(bool)
+    def save_load_on_startup(self, enabled: bool) -> None:
+        """Persist the load-on-startup preference.
+
+        Takes effect at the next app launch (main.py warms the model when this
+        is on and the model is installed). Unloading still follows the idle
+        policy, so turning this on only changes WHEN the first load happens.
+        """
+        self._settings = self._updated_settings(
+            local_stt_load_on_startup=bool(enabled)
+        )
+        self._settings_store.save(self._settings)
+        self.local_stt_load_on_startup_changed.emit(bool(enabled))
+        self.settings_changed.emit()
+
     @Property("QVariantList", notify=local_stt_models_changed)
     def local_stt_models(self) -> list:
         """The model catalog from the registry, for the model pickers.
@@ -836,6 +944,10 @@ class SettingsViewModel(QObject):
         it downloads on its first load).
         """
         engine_ready = self._local_stt.is_installed()
+        # Resolve every model's cached state in ONE filesystem walk rather than
+        # one walk per model — this property is re-read on each status change
+        # (several per load), so N walks here stalled the Qt main thread.
+        cached_ids = self._local_stt.cached_model_ids() if engine_ready else set()
         return [
             {
                 "id": m.id,
@@ -846,7 +958,7 @@ class SettingsViewModel(QObject):
                 "description": m.description,
                 "wer": m.wer_hint,
                 "wordTimestamps": m.supports_word_timestamps,
-                "installed": engine_ready and self._local_stt.is_model_cached(m.id),
+                "installed": m.id in cached_ids,
             }
             for m in model_registry.all_models()
         ]
@@ -1129,6 +1241,28 @@ class SettingsViewModel(QObject):
             self._stt_smart_rotation = value
             self.stt_smart_rotation_changed.emit(value)
 
+    # ------------------------------------------------------------------
+    # rolling_window_s — real-time chunk length (seconds), local model
+    # ------------------------------------------------------------------
+
+    @Property(int, notify=rolling_window_s_changed)
+    def rolling_window_s(self) -> int:
+        """Rolling-window duration in seconds for the real-time streaming path."""
+        return self._settings.rolling_window_s
+
+    @Slot(int)
+    def save_rolling_window_s(self, value: int) -> None:
+        """Persist the rolling-window duration chosen in Settings.
+
+        The value is clamped to [15, 60] by the store on the next load; the
+        backend (AppController → ChunkedAudioService) reads it per session, so a
+        change takes effect on the next recording without a restart.
+        """
+        self._settings = self._updated_settings(rolling_window_s=int(value))
+        self._settings_store.save(self._settings)
+        self.rolling_window_s_changed.emit(int(value))
+        self.settings_changed.emit()
+
     @Property(bool, notify=stt_local_enabled_changed)
     def stt_local_enabled(self) -> bool:
         return self._stt_local_enabled
@@ -1368,9 +1502,8 @@ class SettingsViewModel(QObject):
     @Slot(str, str)
     def add_transcription_entry(self, text: str, timestamp: str) -> None:
         """Append a new transcription result to the history ring buffer."""
-        display = text if len(text) <= 120 else text[:117] + "…"
         self._transcription_history = (
-            self._transcription_history[-(self._MAX_HISTORY - 1):] + [{"time": timestamp, "text": display}]
+            self._transcription_history[-(self._MAX_HISTORY - 1):] + [{"time": timestamp, "text": text}]
         )
         self._settings = self._updated_settings(transcription_history=self._transcription_history)
         self._settings_store.save(self._settings)
@@ -1379,9 +1512,8 @@ class SettingsViewModel(QObject):
     @Slot(str, str)
     def add_processing_entry(self, text: str, timestamp: str) -> None:
         """Append a new processing result to the history ring buffer."""
-        display = text if len(text) <= 120 else text[:117] + "…"
         self._processing_history = (
-            self._processing_history[-(self._MAX_HISTORY - 1):] + [{"time": timestamp, "text": display}]
+            self._processing_history[-(self._MAX_HISTORY - 1):] + [{"time": timestamp, "text": text}]
         )
         self._settings = self._updated_settings(processing_history=self._processing_history)
         self._settings_store.save(self._settings)

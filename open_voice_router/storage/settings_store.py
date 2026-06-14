@@ -18,10 +18,26 @@ import platformdirs
 from open_voice_router.local_asr import registry as _model_registry
 from open_voice_router.models import (
     AppSettings,
+    DEFAULT_CODING_PROMPT,
+    DEFAULT_EMAIL_PROMPT,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_WORD_DICTIONARY,
     PromptConfig,
     ProviderConfig,
+)
+
+import uuid as _uuid
+
+# The original built-in "Clean & Format" prompt text. Used only to detect an
+# UNMODIFIED legacy default so the migration can retire it (replaced by the
+# Email + Coding directives) without clobbering a user who customised it.
+_LEGACY_CLEAN_FORMAT_PROMPT = (
+    "You are a precise text editor. Take the transcribed speech and: "
+    "(1) fix all grammar and punctuation, "
+    "(2) structure into clear paragraphs if the content warrants it, "
+    "(3) remove filler words and false starts, "
+    "(4) preserve technical terms and proper nouns exactly as spoken. "
+    "Return only the formatted text with no commentary."
 )
 
 # Model_Load timeout bounds (R7.2). Values outside this range are rejected and
@@ -83,6 +99,27 @@ def _validate_unload_idle(value: Any) -> int:
     return value
 
 
+# Rolling-window bounds (seconds) for the real-time streaming path. Values
+# outside this range are rejected and fall back to the default.
+_ROLLING_WINDOW_MIN_S = 15
+_ROLLING_WINDOW_MAX_S = 60
+_ROLLING_WINDOW_DEFAULT_S = 20
+
+
+def _validate_rolling_window(value: Any) -> int:
+    """Validate the real-time rolling-window duration (seconds).
+
+    Returns the value unchanged when it is an integer within [15, 60]. Any
+    out-of-range, non-integer (incl. bool), or missing value falls back to the
+    default of 20.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return _ROLLING_WINDOW_DEFAULT_S
+    if value < _ROLLING_WINDOW_MIN_S or value > _ROLLING_WINDOW_MAX_S:
+        return _ROLLING_WINDOW_DEFAULT_S
+    return value
+
+
 def _validate_local_model_id(value: Any) -> str:
     """Validate the selected local STT model id against the model registry.
 
@@ -111,17 +148,57 @@ def _provider_config_from_dict(d: dict[str, Any]) -> ProviderConfig:
 
 
 def _migrate_prompts(prompts: list[PromptConfig]) -> list[PromptConfig]:
-    """Upgrade the built-in 'General' prompt to the current canonical version.
+    """Bring a persisted prompt list up to the current canonical set.
 
-    Only replaces the text when it doesn't already contain <role_definition> —
-    meaning it's an old flat-text default, not a user customisation.
+    Three migrations, all conservative (user customisations are preserved):
+      1. Upgrade the built-in 'General' prompt text when it's still an old
+         flat-text default (no <role_definition>), not a user customisation.
+      2. Retire the legacy 'Clean & Format' prompt, but ONLY when its text is
+         the unmodified built-in — a user who edited it keeps theirs.
+      3. Additively ensure the 'Email' and 'Coding' directives exist (append by
+         name if absent), mirroring _migrate_word_dictionary's additive style.
+
+    Finally, guarantee exactly one active prompt: if retiring Clean & Format (or
+    a pre-existing file) left none active, activate 'General' (or the first).
     """
-    result = []
+    result: list[PromptConfig] = []
+    dropped_active = False
     for p in prompts:
+        # (1) Upgrade an old flat-text General default.
         if p.name == "General" and "<role_definition>" not in p.text:
-            result.append(PromptConfig(id=p.id, name=p.name, text=DEFAULT_SYSTEM_PROMPT, is_active=p.is_active))
-        else:
-            result.append(p)
+            result.append(
+                PromptConfig(id=p.id, name=p.name, text=DEFAULT_SYSTEM_PROMPT, is_active=p.is_active)
+            )
+            continue
+        # (2) Retire the unmodified legacy Clean & Format prompt.
+        if p.name == "Clean & Format" and p.text.strip() == _LEGACY_CLEAN_FORMAT_PROMPT:
+            if p.is_active:
+                dropped_active = True
+            continue
+        result.append(p)
+
+    # (3) Additively ensure Email + Coding exist (match by name) — but only for
+    # a non-empty prompt set. An empty list is a deliberate state (a user who
+    # cleared all prompts, or a minimal config) we must not silently re-seed.
+    if result:
+        present = {p.name for p in result}
+        if "Email" not in present:
+            result.append(
+                PromptConfig(id=str(_uuid.uuid4()), name="Email", text=DEFAULT_EMAIL_PROMPT, is_active=False)
+            )
+        if "Coding" not in present:
+            result.append(
+                PromptConfig(id=str(_uuid.uuid4()), name="Coding", text=DEFAULT_CODING_PROMPT, is_active=False)
+            )
+
+    # Guarantee exactly one active prompt.
+    if result and (dropped_active or not any(p.is_active for p in result)):
+        general_idx = next((i for i, p in enumerate(result) if p.name == "General"), 0)
+        result = [
+            dataclasses.replace(p, is_active=(i == general_idx))
+            for i, p in enumerate(result)
+        ]
+
     return result
 
 
@@ -163,6 +240,9 @@ def _app_settings_from_dict(d: dict[str, Any]) -> AppSettings:
         hotkey=d.get("hotkey", defaults.hotkey),
         hotkey_ai=d.get("hotkey_ai", "ctrl+shift+enter"),
         hotkey_grain=d.get("hotkey_grain", "ctrl+shift+g"),
+        hotkey_batch=d.get("hotkey_batch", "ctrl+shift+z"),
+        hotkey_prompt_prev=d.get("hotkey_prompt_prev", "alt+left"),
+        hotkey_prompt_next=d.get("hotkey_prompt_next", "alt+right"),
         close_to_tray=bool(d.get("close_to_tray", True)),
         microphone_device_id=d.get("microphone_device_id"),
         stt_providers=stt_providers,
@@ -181,7 +261,11 @@ def _app_settings_from_dict(d: dict[str, Any]) -> AppSettings:
         local_stt_unload_idle_ms=_validate_unload_idle(
             d.get("local_stt_unload_idle_ms", _UNLOAD_IDLE_DEFAULT_MS)
         ),
+        local_stt_load_on_startup=bool(d.get("local_stt_load_on_startup", False)),
         local_stt_model_id=_validate_local_model_id(d.get("local_stt_model_id")),
+        rolling_window_s=_validate_rolling_window(
+            d.get("rolling_window_s", _ROLLING_WINDOW_DEFAULT_S)
+        ),
         stt_smart_rotation=bool(d.get("stt_smart_rotation", False)),
         llm_smart_rotation=bool(d.get("llm_smart_rotation", False)),
         grain_assist_provider_id=str(d.get("grain_assist_provider_id", "")),

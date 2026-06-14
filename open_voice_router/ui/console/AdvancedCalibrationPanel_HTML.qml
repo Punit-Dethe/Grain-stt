@@ -131,7 +131,7 @@ Item {
 
                             color: active
                                    ? Qt.rgba(orange.r, orange.g, orange.b, 0.12)
-                                   : navHover.containsMouse ? Qt.rgba(0,0,0,0.03) : "transparent"
+                                   : navHover.hovered ? Qt.rgba(0,0,0,0.03) : "transparent"
 
                             border.color: active ? Qt.rgba(orange.r, orange.g, orange.b, 0.4) : "transparent"
                             border.width: active ? 1 : 0
@@ -191,9 +191,9 @@ Item {
                     Layout.fillWidth: true
                     height: 40
                     radius: 8
-                    color: closeBtnHover.containsMouse
+                    color: closeBtnHover.hovered
                            ? Qt.rgba(1, 0.365, 0.118, 0.1) : "transparent"
-                    border.color: closeBtnHover.containsMouse
+                    border.color: closeBtnHover.hovered
                            ? Qt.rgba(1, 0.365, 0.118, 0.3) : "transparent"
                     border.width: 1
 
@@ -526,7 +526,7 @@ Item {
             anchors.fill: parent
             radius: 6
             color: surfaceInput
-            border.color: skb.listening ? orange : (skbHov.containsMouse ? Qt.rgba(0,0,0,0.12) : divider)
+            border.color: skb.listening ? orange : (skbHov.hovered ? Qt.rgba(0,0,0,0.12) : divider)
             border.width: 1
             Behavior on border.color { ColorAnimation { duration: 150 } }
 
@@ -574,8 +574,8 @@ Item {
                         Rectangle { Layout.fillWidth: true; height: 1; color: divider }
 
                         SettingRow {
-                            label: "Dictation Shortcut"
-                            hint: "Trigger raw microphone transcription"
+                            label: "Real-time Dictation"
+                            hint: "Transcribes live as you speak · end with this shortcut to paste"
                             ShortcutKeyBox {
                                 currentValue: consoleViewModel.hotkey
                                 onCaptured: function(hk) { consoleViewModel.save_hotkey(hk) }
@@ -583,11 +583,53 @@ Item {
                         }
 
                         SettingRow {
-                            label: "Voice-to-AI Shortcut"
-                            hint: "Process and style with active LLM"
+                            label: "Record then Transcribe"
+                            hint: "Records first, transcribes after — slower but most accurate"
+                            ShortcutKeyBox {
+                                currentValue: consoleViewModel.hotkey_batch
+                                onCaptured: function(hk) { consoleViewModel.save_hotkey_batch(hk) }
+                            }
+                        }
+
+                        SettingRow {
+                            label: "AI Processing"
+                            hint: "End any recording with this shortcut to process & style with AI"
                             ShortcutKeyBox {
                                 currentValue: consoleViewModel.hotkey_ai
                                 onCaptured: function(hk) { consoleViewModel.save_hotkey_ai(hk) }
+                            }
+                        }
+
+                        SettingRow {
+                            label: "Prompt Navigation"
+                            hint: "Cycle the active prompt profile mid-recording — back / forward"
+
+                            Text {
+                                text: "‹"
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 15
+                                color: orange
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                            ShortcutKeyBox {
+                                Layout.preferredWidth: 70
+                                Layout.minimumWidth: 70
+                                currentValue: consoleViewModel.hotkey_prompt_prev
+                                onCaptured: function(hk) { consoleViewModel.save_hotkey_prompt_prev(hk) }
+                            }
+
+                            Text {
+                                text: "›"
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 15
+                                color: orange
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+                            ShortcutKeyBox {
+                                Layout.preferredWidth: 70
+                                Layout.minimumWidth: 70
+                                currentValue: consoleViewModel.hotkey_prompt_next
+                                onCaptured: function(hk) { consoleViewModel.save_hotkey_prompt_next(hk) }
                             }
                         }
 
@@ -897,6 +939,16 @@ Item {
                         return 1  // default → 5 minutes
                     }
 
+                    // Rolling-window duration (seconds) for the real-time path.
+                    // Maps the combo index to the persisted value; the backend
+                    // (ChunkedAudioService) reads it per session. Clamped 15–60s.
+                    readonly property var rollingWindowValues: [15, 20, 25, 30, 45, 60]
+                    function rollingWindowIndexFor(sec) {
+                        for (var i = 0; i < rollingWindowValues.length; i++)
+                            if (rollingWindowValues[i] === sec) return i
+                        return 1  // default → 20 seconds
+                    }
+
                     // Live status from the SettingsViewModel / LocalSTTManager.
                     // Falls back to "not_installed" when the VM is not yet available.
                     property string liveStatus: {
@@ -997,7 +1049,7 @@ Item {
                             // Trash — visible only when the venv actually exists
                             Rectangle {
                                 width: 28; height: 28; radius: 6
-                                color: deleteTopHover.containsMouse ? Qt.rgba(0.8, 0.2, 0.2, 0.1) : "transparent"
+                                color: deleteTopHover.hovered ? Qt.rgba(0.8, 0.2, 0.2, 0.1) : "transparent"
                                 visible: {
                                     var s = offlineWeightsCard.liveStatus
                                     return s === "stopped" || s === "starting" || s === "running" || s === "error"
@@ -1009,7 +1061,7 @@ Item {
                                     onPaint: {
                                         var ctx = getContext("2d")
                                         ctx.clearRect(0, 0, width, height)
-                                        ctx.strokeStyle = deleteTopHover.containsMouse ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.4)
+                                        ctx.strokeStyle = deleteTopHover.hovered ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.4)
                                         ctx.lineWidth = 1.5; ctx.lineCap = "round"
                                         ctx.strokeRect(2, 4, 10, 9)
                                         ctx.beginPath(); ctx.moveTo(1, 4); ctx.lineTo(13, 4); ctx.stroke()
@@ -1179,7 +1231,7 @@ Item {
                                     anchors.fill: parent
                                     radius: 8
                                     color: isActive ? Qt.rgba(0,0,0,0.05)
-                                         : (modelHover.containsMouse ? Qt.rgba(0,0,0,0.04) : "transparent")
+                                         : (modelHover.hovered ? Qt.rgba(0,0,0,0.04) : "transparent")
                                     border.color: isActive ? Qt.rgba(0,0,0,0.10) : "transparent"
                                     border.width: isActive ? 1 : 0
                                     Behavior on color { ColorAnimation { duration: 150 } }
@@ -1210,6 +1262,40 @@ Item {
 
                                         Item { Layout.fillWidth: true }
 
+                                        // Installed indicator — a clear chip so the
+                                        // user can see at a glance which weights are
+                                        // downloaded (vs. download-on-first-load).
+                                        Rectangle {
+                                            id: installedBadge
+                                            property bool isInstalled: modelData.installed === true
+                                            implicitWidth: installedBadgeRow.implicitWidth + 16
+                                            height: 22
+                                            radius: 11
+                                            color: isInstalled ? Qt.rgba(0.063, 0.725, 0.506, 0.14)
+                                                               : Qt.rgba(0.078, 0.075, 0.071, 0.06)
+                                            border.width: 1
+                                            border.color: isInstalled ? Qt.rgba(0.063, 0.725, 0.506, 0.45) : divider
+
+                                            RowLayout {
+                                                id: installedBadgeRow
+                                                anchors.centerIn: parent
+                                                spacing: 5
+
+                                                Rectangle {
+                                                    width: 6; height: 6; radius: 3
+                                                    color: installedBadge.isInstalled ? green : textGhost
+                                                }
+                                                Text {
+                                                    text: installedBadge.isInstalled ? "INSTALLED" : "NOT INSTALLED"
+                                                    font.family: "JetBrains Mono"
+                                                    font.pixelSize: 8
+                                                    font.bold: true
+                                                    font.letterSpacing: 0.5
+                                                    color: installedBadge.isInstalled ? green : textMuted
+                                                }
+                                            }
+                                        }
+
                                         // Select / Active button
                                         Rectangle {
                                             width: 100
@@ -1217,7 +1303,7 @@ Item {
                                             radius: 6
                                             color: {
                                                 if (isActive) return charcoal
-                                                if (selectBtnHover.containsMouse) return Qt.rgba(1, 0.365, 0.118, 0.85)
+                                                if (selectBtnHover.hovered) return Qt.rgba(1, 0.365, 0.118, 0.85)
                                                 return Qt.rgba(0.078, 0.075, 0.071, 0.15)
                                             }
                                             border.color: isActive ? "transparent" : divider
@@ -1243,7 +1329,7 @@ Item {
                                                     font.bold: true
                                                     font.letterSpacing: 0.5
                                                     color: isActive ? textLight
-                                                         : (selectBtnHover.containsMouse ? "white"
+                                                         : (selectBtnHover.hovered ? "white"
                                                             : Qt.rgba(0.078, 0.075, 0.071, 0.5))
                                                 }
                                             }
@@ -1293,7 +1379,7 @@ Item {
                                 font.pixelSize: 9
                                 font.bold: true
                                 font.letterSpacing: 1.5
-                                color: viewMoreHover.containsMouse ? orange : textGhost
+                                color: viewMoreHover.hovered ? orange : textGhost
                                 Behavior on color { ColorAnimation { duration: 150 } }
                             }
 
@@ -1301,7 +1387,7 @@ Item {
                                 text: offlineWeightsCard.expanded ? "▲" : "▼"
                                 font.family: "JetBrains Mono"
                                 font.pixelSize: 11
-                                color: viewMoreHover.containsMouse ? orange : textGhost
+                                color: viewMoreHover.hovered ? orange : textGhost
                                 Behavior on color { ColorAnimation { duration: 150 } }
                             }
                         }
@@ -1331,7 +1417,25 @@ Item {
                         SectionTitle { text: "REAL-TIME STREAM PARAMETERS" }
                         Rectangle { Layout.fillWidth: true; height: 1; color: divider }
 
-                        // Model Unload — the only wired parameter; kept at the top.
+                        // Model Load — pre-warm the selected model at app launch
+                        // so the first dictation is instant. Wired to the shared
+                        // view model; stays in sync with Module B's "Launch on
+                        // startup" toggle. Unloading still follows Model Unload.
+                        SettingRow {
+                            label: "Load on Startup"
+                            hint: "Pre-load the selected model when the app launches"
+
+                            MechanicalToggle {
+                                value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                    ? consoleViewModel.local_stt_load_on_startup : false
+                                onToggled: {
+                                    if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        consoleViewModel.save_load_on_startup(checked)
+                                }
+                            }
+                        }
+
+                        // Model Unload — kept at the top.
                         SettingRow {
                             label: "Model Unload"
                             hint: "Auto-unload after this much idle time"
@@ -1357,28 +1461,29 @@ Item {
                             }
                         }
 
-                        // Rolling Window — not user-configurable yet. A wrong value
-                        // can hurt accuracy, so it stays fixed (overlap is locked at
-                        // 2 s internally). Surfaced as "coming soon".
+                        // Rolling Window — how much audio accumulates before the
+                        // real-time path cuts a chunk and sends it to the model.
+                        // Larger = fewer chunk boundaries (better accuracy) but a
+                        // longer flush on stop. Wired to ChunkedAudioService per
+                        // session via the backend. Overlap stays locked at 2 s.
                         SettingRow {
                             label: "Rolling Window"
-                            hint: "Audio buffer window duration"
+                            hint: "Live chunk length — longer is more accurate, slower to finish"
 
-                            Rectangle {
-                                Layout.preferredHeight: 22
-                                Layout.preferredWidth: _rwSoonText.implicitWidth + 18
-                                radius: 11
-                                color: Qt.rgba(0.078, 0.075, 0.071, 0.06)
-                                border.color: Qt.rgba(0.078, 0.075, 0.071, 0.15)
-                                border.width: 1
-                                Text {
-                                    id: _rwSoonText
-                                    anchors.centerIn: parent
-                                    text: "coming soon"
-                                    font.family: "JetBrains Mono"
-                                    font.pixelSize: 9
-                                    color: Qt.rgba(0.078, 0.075, 0.071, 0.4)
+                            ComboBox {
+                                id: rollingWindowCombo
+                                Layout.preferredWidth: 176
+                                implicitHeight: 32
+                                model: ["15 seconds", "20 seconds", "25 seconds", "30 seconds", "45 seconds", "60 seconds"]
+                                currentIndex: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                    ? offlineWeightsCard.rollingWindowIndexFor(consoleViewModel.rolling_window_s)
+                                    : 1
+                                onActivated: {
+                                    if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        consoleViewModel.save_rolling_window_s(offlineWeightsCard.rollingWindowValues[currentIndex])
                                 }
+                                background: Rectangle { radius: 6; color: surfaceInput; border.color: divider; border.width: 1 }
+                                contentItem: Text { leftPadding: 10; text: parent.displayText; font.family: "JetBrains Mono"; font.pixelSize: 11; color: textPrimary; verticalAlignment: Text.AlignVCenter }
                             }
                         }
                     }
@@ -1394,6 +1499,41 @@ Item {
                 SectionCard {
                     id: addProviderCard
                     property bool expanded: false
+                    // Edit mode: empty = "add new", non-empty = editing that
+                    // provider id (the form is reused as an edit dialog). The
+                    // original name is preserved on save since this UI derives
+                    // the name automatically rather than exposing a name field.
+                    property string editingProviderId: ""
+                    property string editingProviderName: ""
+
+                    // Restore the Endpoint URL declarative binding and clear the
+                    // form. Editing assigns endpointUrl.text directly (breaking
+                    // its binding), so we re-establish it with Qt.binding here so
+                    // a subsequent "Add" still auto-fills cloud preset URLs.
+                    function _resetForm() {
+                        editingProviderId = ""
+                        editingProviderName = ""
+                        apiKeyField.text = ""
+                        providerDropdown.currentIndex = 0
+                        endpointUrl.text = Qt.binding(function() {
+                            if (providerDropdown.currentText === "Deepgram")        return "https://api.deepgram.com"
+                            if (providerDropdown.currentText === "AssemblyAI")      return "https://api.assemblyai.com"
+                            if (providerDropdown.currentText === "Groq (Whisper)") return "https://api.groq.com/openai/v1"
+                            return ""
+                        })
+                    }
+
+                    // Open the form pre-filled to edit an existing provider.
+                    function beginEdit(p) {
+                        if (!p) return
+                        editingProviderId = p.id
+                        editingProviderName = p.name
+                        providerDropdown.currentIndex = 3   // Custom Endpoint → editable URL
+                        modelNameField.text = p.model
+                        endpointUrl.text = p.base_url
+                        apiKeyField.text = ""                // blank = keep current key
+                        expanded = true
+                    }
 
                     implicitHeight: expanded ? (addProviderCol.implicitHeight + 32 + addFormColumn.implicitHeight + 16) : (addProviderCol.implicitHeight + 32)
                     Behavior on implicitHeight { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
@@ -1418,7 +1558,8 @@ Item {
                                 spacing: 2
 
                                 Text {
-                                    text: "Add New Provider"
+                                    text: addProviderCard.editingProviderId !== ""
+                                          ? "Edit Provider" : "Add New Provider"
                                     font.family: "Plus Jakarta Sans"
                                     font.pixelSize: 14
                                     font.bold: false
@@ -1426,11 +1567,14 @@ Item {
                                 }
 
                                 Text {
-                                    text: "Connect a speech or language model endpoint"
+                                    text: addProviderCard.editingProviderId !== ""
+                                          ? ("Editing " + addProviderCard.editingProviderName)
+                                          : "Connect a speech or language model endpoint"
                                     font.family: "Plus Jakarta Sans"
                                     font.pixelSize: 11
                                     color: textMuted
-                                    visible: !addProviderCard.expanded
+                                    visible: !addProviderCard.expanded || addProviderCard.editingProviderId !== ""
+                                    elide: Text.ElideRight
                                 }
                             }
 
@@ -1460,11 +1604,11 @@ Item {
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: addProviderCard.expanded = false
+                                    onClicked: { addProviderCard.expanded = false; addProviderCard._resetForm() }
                                 }
                             }
 
-                            // ADD button — pinned to right edge
+                            // ADD / SAVE button — pinned to right edge
                             Rectangle {
                                 id: _addProviderAddBtn
                                 width: 80; height: 34; radius: 6
@@ -1485,7 +1629,7 @@ Item {
                                     }
 
                                     Text {
-                                        text: "ADD"
+                                        text: addProviderCard.editingProviderId !== "" ? "SAVE" : "ADD"
                                         font.family: "JetBrains Mono"
                                         font.pixelSize: 10
                                         font.bold: true
@@ -1500,12 +1644,16 @@ Item {
                                     onClicked: {
                                         if (addProviderCard.expanded) {
                                             if (typeof consoleViewModel === "undefined" || !consoleViewModel) return
-                                            var autoName = providerDropdown.currentText + " (" + modelNameField.text.trim() + ")"
-                                            consoleViewModel.add_provider("stt", autoName, endpointUrl.text.trim(), modelNameField.text.trim(), apiKeyField.text, -1, "")
+                                            if (addProviderCard.editingProviderId !== "") {
+                                                // Edit: preserve the original name; blank key keeps the stored one.
+                                                consoleViewModel.update_provider(addProviderCard.editingProviderId, addProviderCard.editingProviderName, endpointUrl.text.trim(), modelNameField.text.trim(), apiKeyField.text, -1, "")
+                                            } else {
+                                                var autoName = providerDropdown.currentText + " (" + modelNameField.text.trim() + ")"
+                                                consoleViewModel.add_provider("stt", autoName, endpointUrl.text.trim(), modelNameField.text.trim(), apiKeyField.text, -1, "")
+                                            }
                                             if (consoleViewModel.error_message === "") {
                                                 addProviderCard.expanded = false
-                                                apiKeyField.text = ""
-                                                providerDropdown.currentIndex = 0
+                                                addProviderCard._resetForm()
                                             }
                                         } else {
                                             addProviderCard.expanded = true
@@ -1647,7 +1795,8 @@ Item {
                             id: apiKeyField
                             Layout.fillWidth: true
                             Layout.preferredHeight: 40
-                            placeholderText: "API Key"
+                            placeholderText: addProviderCard.editingProviderId !== ""
+                                             ? "API Key (leave blank to keep current)" : "API Key"
                             placeholderTextColor: charcoal
                             echoMode: TextInput.Password
                             font.family: "JetBrains Mono"
@@ -1682,6 +1831,21 @@ Item {
                     // Mirrors consoleViewModel.stt_smart_rotation — reactive via binding
                     property bool smartRotation: (typeof consoleViewModel !== "undefined" && consoleViewModel)
                                                   ? consoleViewModel.stt_smart_rotation : false
+
+                    // Cloud (non-local) providers, computed ONCE per stt_providers
+                    // change. Reading consoleViewModel.stt_providers marshals the
+                    // whole Python list into QML; the cloud header, empty state,
+                    // and the Repeater each used to do that (plus the filter)
+                    // independently. Caching here collapses three marshals+filters
+                    // per change into one.
+                    readonly property var cloudProviders: {
+                        var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
+                        if (!vm) return []
+                        return vm.stt_providers.filter(function(p) {
+                            var u = p.base_url || ""
+                            return u.indexOf("127.0.0.1") === -1 && u.indexOf("localhost") === -1
+                        })
+                    }
 
                     ColumnLayout {
                         id: installedCol
@@ -1780,14 +1944,7 @@ Item {
                             // ── CLOUD section header (only when cloud providers exist) ──
                             RowLayout {
                                 Layout.fillWidth: true; spacing: 8
-                                visible: {
-                                    var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
-                                    if (!vm) return false
-                                    return vm.stt_providers.filter(function(p) {
-                                        var u = p.base_url || ""
-                                        return u.indexOf("127.0.0.1") === -1 && u.indexOf("localhost") === -1
-                                    }).length > 0
-                                }
+                                visible: installedProvidersCard.cloudProviders.length > 0
                                 Rectangle { Layout.fillWidth: true; height: 1; color: divider }
                                 Text { text: "CLOUD"; font.family: "JetBrains Mono"; font.pixelSize: 8; font.bold: true; font.letterSpacing: 1.2; color: textGhost }
                                 Rectangle { Layout.fillWidth: true; height: 1; color: divider }
@@ -1795,14 +1952,7 @@ Item {
 
                             // Empty state for cloud (no cloud providers yet)
                             Rectangle {
-                                visible: {
-                                    var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
-                                    if (!vm) return true
-                                    return vm.stt_providers.filter(function(p) {
-                                        var u = p.base_url || ""
-                                        return u.indexOf("127.0.0.1") === -1 && u.indexOf("localhost") === -1
-                                    }).length === 0
-                                }
+                                visible: installedProvidersCard.cloudProviders.length === 0
                                 Layout.fillWidth: true; height: 36; radius: 8; color: "transparent"
                                 Text {
                                     anchors.centerIn: parent
@@ -1812,20 +1962,13 @@ Item {
                             }
 
                             Repeater {
-                                model: {
-                                    var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
-                                    if (!vm) return []
-                                    return vm.stt_providers.filter(function(p) {
-                                        var u = p.base_url || ""
-                                        return u.indexOf("127.0.0.1") === -1 && u.indexOf("localhost") === -1
-                                    })
-                                }
+                                model: installedProvidersCard.cloudProviders
 
                                 delegate: Rectangle {
                                     Layout.fillWidth: true
                                     height: 52
                                     radius: 8
-                                    color: sttRowHover.containsMouse ? Qt.rgba(0,0,0,0.04) : "transparent"
+                                    color: sttRowHover.hovered ? Qt.rgba(0,0,0,0.04) : "transparent"
                                     Behavior on color { ColorAnimation { duration: 150 } }
 
                                     HoverHandler { id: sttRowHover }
@@ -1860,11 +2003,12 @@ Item {
 
                                         Item { Layout.fillWidth: true }
 
-                                        // Trash icon — appears on row hover, left of toggle
+                                        // Edit (pencil) — appears on row hover, opens the
+                                        // Add-Provider form pre-filled for this provider.
                                         Rectangle {
                                             width: 28; height: 28; radius: 6
-                                            color: sttTrashHover.containsMouse ? Qt.rgba(0.8, 0.2, 0.2, 0.12) : "transparent"
-                                            visible: sttRowHover.containsMouse === true || sttTrashHover.containsMouse === true
+                                            color: sttEditHover.hovered ? Qt.rgba(0.078, 0.075, 0.071, 0.10) : "transparent"
+                                            visible: sttRowHover.hovered === true || sttEditHover.hovered === true
                                             Behavior on color { ColorAnimation { duration: 120 } }
 
                                             Canvas {
@@ -1873,7 +2017,42 @@ Item {
                                                 onPaint: {
                                                     var ctx = getContext("2d")
                                                     ctx.clearRect(0, 0, width, height)
-                                                    ctx.strokeStyle = sttTrashHover.containsMouse ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.45)
+                                                    ctx.strokeStyle = sttEditHover.hovered ? orange : Qt.rgba(0.078, 0.075, 0.071, 0.45)
+                                                    ctx.lineWidth = 1.5
+                                                    ctx.lineCap = "round"
+                                                    // pencil body
+                                                    ctx.beginPath(); ctx.moveTo(9, 2); ctx.lineTo(12, 5); ctx.lineTo(5, 12); ctx.lineTo(2, 12); ctx.lineTo(2, 9); ctx.closePath(); ctx.stroke()
+                                                    // tip line
+                                                    ctx.beginPath(); ctx.moveTo(8, 3); ctx.lineTo(11, 6); ctx.stroke()
+                                                }
+                                            }
+
+                                            HoverHandler {
+                                                id: sttEditHover
+                                                onHoveredChanged: parent.children[0].requestPaint()
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: addProviderCard.beginEdit(modelData)
+                                            }
+                                        }
+
+                                        // Trash icon — appears on row hover, left of toggle
+                                        Rectangle {
+                                            width: 28; height: 28; radius: 6
+                                            color: sttTrashHover.hovered ? Qt.rgba(0.8, 0.2, 0.2, 0.12) : "transparent"
+                                            visible: sttRowHover.hovered === true || sttTrashHover.hovered === true
+                                            Behavior on color { ColorAnimation { duration: 120 } }
+
+                                            Canvas {
+                                                anchors.centerIn: parent
+                                                width: 14; height: 14
+                                                onPaint: {
+                                                    var ctx = getContext("2d")
+                                                    ctx.clearRect(0, 0, width, height)
+                                                    ctx.strokeStyle = sttTrashHover.hovered ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.45)
                                                     ctx.lineWidth = 1.5
                                                     ctx.lineCap = "round"
                                                     ctx.strokeRect(2, 4, 10, 9)
@@ -1940,6 +2119,33 @@ Item {
                 SectionCard {
                     id: addLlmProviderCard
                     property bool expanded: false
+                    // Edit mode — see addProviderCard for the rationale. Empty =
+                    // "add new"; non-empty = editing that provider id.
+                    property string editingProviderId: ""
+                    property string editingProviderName: ""
+
+                    function _resetForm() {
+                        editingProviderId = ""
+                        editingProviderName = ""
+                        llmApiKeyField.text = ""
+                        llmProviderDropdown.currentIndex = 0
+                        llmEndpointUrl.text = Qt.binding(function() {
+                            if (addLlmProviderCard.isCustomIndex(llmProviderDropdown.currentIndex)) return ""
+                            var p = addLlmProviderCard.llmPresets[llmProviderDropdown.currentIndex]
+                            return p ? p.base_url : ""
+                        })
+                    }
+
+                    function beginEdit(p) {
+                        if (!p) return
+                        editingProviderId = p.id
+                        editingProviderName = p.name
+                        llmProviderDropdown.currentIndex = llmPresets.length   // Custom Endpoint
+                        llmModelNameField.text = p.model
+                        llmEndpointUrl.text = p.base_url
+                        llmApiKeyField.text = ""
+                        expanded = true
+                    }
 
                     // Preset list is the SINGLE SOURCE OF TRUTH from the backend
                     // (PROVIDER_PRESETS via get_presets) — so every provider we
@@ -1975,13 +2181,15 @@ Item {
                             spacing: 12
 
                             Text {
-                                text: "ADD NEW PROVIDER"
+                                text: addLlmProviderCard.editingProviderId !== ""
+                                      ? ("EDIT — " + addLlmProviderCard.editingProviderName) : "ADD NEW PROVIDER"
                                 font.family: "JetBrains Mono"
                                 font.pixelSize: 10
                                 font.bold: false
                                 font.letterSpacing: 1.5
                                 color: textGhost
                                 Layout.fillWidth: true
+                                elide: Text.ElideRight
                             }
 
                             Rectangle {
@@ -2005,7 +2213,7 @@ Item {
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: addLlmProviderCard.expanded = false
+                                    onClicked: { addLlmProviderCard.expanded = false; addLlmProviderCard._resetForm() }
                                 }
                             }
 
@@ -2028,7 +2236,7 @@ Item {
                                     }
 
                                     Text {
-                                        text: "ADD"
+                                        text: addLlmProviderCard.editingProviderId !== "" ? "SAVE" : "ADD"
                                         font.family: "JetBrains Mono"
                                         font.pixelSize: 10
                                         font.bold: true
@@ -2044,12 +2252,15 @@ Item {
                                     onClicked: {
                                         if (addLlmProviderCard.expanded) {
                                             if (typeof consoleViewModel === "undefined" || !consoleViewModel) return
-                                            var autoName = llmProviderDropdown.currentText + " (" + llmModelNameField.text.trim() + ")"
-                                            consoleViewModel.add_provider("llm", autoName, llmEndpointUrl.text.trim(), llmModelNameField.text.trim(), llmApiKeyField.text, -1, "")
+                                            if (addLlmProviderCard.editingProviderId !== "") {
+                                                consoleViewModel.update_provider(addLlmProviderCard.editingProviderId, addLlmProviderCard.editingProviderName, llmEndpointUrl.text.trim(), llmModelNameField.text.trim(), llmApiKeyField.text, -1, "")
+                                            } else {
+                                                var autoName = llmProviderDropdown.currentText + " (" + llmModelNameField.text.trim() + ")"
+                                                consoleViewModel.add_provider("llm", autoName, llmEndpointUrl.text.trim(), llmModelNameField.text.trim(), llmApiKeyField.text, -1, "")
+                                            }
                                             if (consoleViewModel.error_message === "") {
                                                 addLlmProviderCard.expanded = false
-                                                llmApiKeyField.text = ""
-                                                llmProviderDropdown.currentIndex = 0
+                                                addLlmProviderCard._resetForm()
                                             }
                                         } else {
                                             addLlmProviderCard.expanded = true
@@ -2189,7 +2400,8 @@ Item {
                             id: llmApiKeyField
                             Layout.fillWidth: true
                             Layout.preferredHeight: 40
-                            placeholderText: "API Key"
+                            placeholderText: addLlmProviderCard.editingProviderId !== ""
+                                             ? "API Key (leave blank to keep current)" : "API Key"
                             placeholderTextColor: charcoal
                             echoMode: TextInput.Password
                             font.family: "JetBrains Mono"
@@ -2226,6 +2438,12 @@ Item {
                     // agree. The toggle uses controlled `value:` mode below.
                     property bool smartRotation: (typeof consoleViewModel !== "undefined" && consoleViewModel)
                                                   ? consoleViewModel.llm_smart_rotation : false
+
+                    // Marshalled once per llm_providers change; the empty-state
+                    // and the Repeater both consume it (was two full Python->QML
+                    // conversions of the list per change).
+                    readonly property var llmProviders: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                                          ? consoleViewModel.llm_providers : []
 
                     ColumnLayout {
                         id: installedLlmCol
@@ -2278,7 +2496,7 @@ Item {
 
                             // Empty state
                             Rectangle {
-                                visible: typeof consoleViewModel === "undefined" || !consoleViewModel || consoleViewModel.llm_providers.length === 0
+                                visible: installedLlmProvidersCard.llmProviders.length === 0
                                 Layout.fillWidth: true
                                 height: 52
                                 radius: 8
@@ -2293,13 +2511,13 @@ Item {
                             }
 
                             Repeater {
-                                model: typeof consoleViewModel !== "undefined" && consoleViewModel ? consoleViewModel.llm_providers : []
+                                model: installedLlmProvidersCard.llmProviders
 
                                 delegate: Rectangle {
                                     Layout.fillWidth: true
                                     height: 52
                                     radius: 8
-                                    color: llmRowHover.containsMouse ? Qt.rgba(0,0,0,0.04) : "transparent"
+                                    color: llmRowHover.hovered ? Qt.rgba(0,0,0,0.04) : "transparent"
                                     Behavior on color { ColorAnimation { duration: 150 } }
 
                                     HoverHandler { id: llmRowHover }
@@ -2346,11 +2564,11 @@ Item {
 
                                         Item { Layout.fillWidth: true }
 
-                                        // Trash icon — appears on row hover
+                                        // Edit (pencil) — opens the Add-Provider form pre-filled.
                                         Rectangle {
                                             width: 28; height: 28; radius: 6
-                                            color: llmTrashHover.containsMouse ? Qt.rgba(0.8, 0.2, 0.2, 0.12) : "transparent"
-                                            visible: llmRowHover.containsMouse === true || llmTrashHover.containsMouse === true
+                                            color: llmEditHover.hovered ? Qt.rgba(0.078, 0.075, 0.071, 0.10) : "transparent"
+                                            visible: llmRowHover.hovered === true || llmEditHover.hovered === true
                                             Behavior on color { ColorAnimation { duration: 120 } }
 
                                             Canvas {
@@ -2359,7 +2577,40 @@ Item {
                                                 onPaint: {
                                                     var ctx = getContext("2d")
                                                     ctx.clearRect(0, 0, width, height)
-                                                    ctx.strokeStyle = llmTrashHover.containsMouse ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.45)
+                                                    ctx.strokeStyle = llmEditHover.hovered ? orange : Qt.rgba(0.078, 0.075, 0.071, 0.45)
+                                                    ctx.lineWidth = 1.5
+                                                    ctx.lineCap = "round"
+                                                    ctx.beginPath(); ctx.moveTo(9, 2); ctx.lineTo(12, 5); ctx.lineTo(5, 12); ctx.lineTo(2, 12); ctx.lineTo(2, 9); ctx.closePath(); ctx.stroke()
+                                                    ctx.beginPath(); ctx.moveTo(8, 3); ctx.lineTo(11, 6); ctx.stroke()
+                                                }
+                                            }
+
+                                            HoverHandler {
+                                                id: llmEditHover
+                                                onHoveredChanged: parent.children[0].requestPaint()
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: addLlmProviderCard.beginEdit(modelData)
+                                            }
+                                        }
+
+                                        // Trash icon — appears on row hover
+                                        Rectangle {
+                                            width: 28; height: 28; radius: 6
+                                            color: llmTrashHover.hovered ? Qt.rgba(0.8, 0.2, 0.2, 0.12) : "transparent"
+                                            visible: llmRowHover.hovered === true || llmTrashHover.hovered === true
+                                            Behavior on color { ColorAnimation { duration: 120 } }
+
+                                            Canvas {
+                                                anchors.centerIn: parent
+                                                width: 14; height: 14
+                                                onPaint: {
+                                                    var ctx = getContext("2d")
+                                                    ctx.clearRect(0, 0, width, height)
+                                                    ctx.strokeStyle = llmTrashHover.hovered ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.45)
                                                     ctx.lineWidth = 1.5
                                                     ctx.lineCap = "round"
                                                     ctx.strokeRect(2, 4, 10, 9)
@@ -2501,6 +2752,15 @@ Item {
                     property string selectedPromptId: ""
                     property bool _justAdded: false
 
+                    // Prompts list marshalled from Python ONCE per change and a
+                    // cheap derived count. The header total and the (per-row and
+                    // editor) DELETE visibility all read .length — each of which
+                    // otherwise re-marshalled the whole list (including every
+                    // prompt's full text) just to count it. promptCount derives
+                    // from the already-converted JS array, so those reads are free.
+                    readonly property var promptList: consoleViewModel ? consoleViewModel.prompts : []
+                    readonly property int promptCount: promptList.length
+
                     implicitHeight: promptsMainCol.implicitHeight + 32
 
                     function _selectedData() {
@@ -2582,7 +2842,7 @@ Item {
                             Item { Layout.fillWidth: true }
                             Text {
                                 text: {
-                                    var n = consoleViewModel ? consoleViewModel.prompts.length : 0
+                                    var n = promptsBuilderCard.promptCount
                                     return n + (n === 1 ? " prompt" : " prompts")
                                 }
                                 font.family: "JetBrains Mono"; font.pixelSize: 9; color: textGhost
@@ -2617,7 +2877,7 @@ Item {
                                         height: parent.height
 
                                         Repeater {
-                                            model: consoleViewModel ? consoleViewModel.prompts : []
+                                            model: promptsBuilderCard.promptList
 
                                             Rectangle {
                                                 id: promptTab
@@ -2630,7 +2890,7 @@ Item {
 
                                                 color: isSelected
                                                        ? charcoal
-                                                       : (tabHov.containsMouse ? Qt.rgba(0,0,0,0.10) : Qt.rgba(0,0,0,0.05))
+                                                       : (tabHov.hovered ? Qt.rgba(0,0,0,0.10) : Qt.rgba(0,0,0,0.05))
                                                 Behavior on color { ColorAnimation { duration: 120 } }
 
                                                 HoverHandler { id: tabHov }
@@ -2654,7 +2914,7 @@ Item {
                                                         font.bold: promptTab.isSelected
                                                         color: promptTab.isSelected
                                                                ? "#ECE5DA"
-                                                               : (tabHov.containsMouse ? charcoal : textMuted)
+                                                               : (tabHov.hovered ? charcoal : textMuted)
                                                         anchors.verticalCenter: parent.verticalCenter
                                                         Behavior on color { ColorAnimation { duration: 120 } }
                                                     }
@@ -2664,8 +2924,8 @@ Item {
                                                         font.pixelSize: 14
                                                         anchors.verticalCenter: parent.verticalCenter
                                                         color: promptTab.isSelected ? Qt.rgba(1,1,1,0.45) : textGhost
-                                                        visible: tabHov.containsMouse === true &&
-                                                                 (consoleViewModel && consoleViewModel.prompts ? consoleViewModel.prompts.length > 1 : false)
+                                                        visible: tabHov.hovered === true &&
+                                                                 promptsBuilderCard.promptCount > 1
 
                                                         MouseArea {
                                                             anchors.fill: parent; anchors.margins: -4
@@ -2688,7 +2948,7 @@ Item {
 
                                                 MouseArea {
                                                     anchors.fill: parent
-                                                    anchors.rightMargin: tabHov.containsMouse ? 22 : 0
+                                                    anchors.rightMargin: tabHov.hovered ? 22 : 0
                                                     cursorShape: Qt.PointingHandCursor
                                                     onClicked: promptsBuilderCard.selectedPromptId = modelData.id
                                                 }
@@ -2727,12 +2987,12 @@ Item {
                             // + add new prompt tab
                             Rectangle {
                                 height: 32; width: 32; radius: 8
-                                color: addTabHov.containsMouse ? Qt.rgba(0,0,0,0.10) : Qt.rgba(0,0,0,0.05)
+                                color: addTabHov.hovered ? Qt.rgba(0,0,0,0.10) : Qt.rgba(0,0,0,0.05)
                                 Behavior on color { ColorAnimation { duration: 120 } }
                                 HoverHandler { id: addTabHov }
                                 Text {
                                     anchors.centerIn: parent; text: "+"
-                                    font.pixelSize: 16; color: addTabHov.containsMouse ? charcoal : textMuted
+                                    font.pixelSize: 16; color: addTabHov.hovered ? charcoal : textMuted
                                     Behavior on color { ColorAnimation { duration: 120 } }
                                 }
                                 MouseArea {
@@ -2769,7 +3029,7 @@ Item {
                                     color: surfaceInput
                                     border.color: promptNameField.activeFocus
                                                   ? orange
-                                                  : (nameHov.containsMouse
+                                                  : (nameHov.hovered
                                                      ? Qt.rgba(0,0,0,0.15)
                                                      : Qt.rgba(0,0,0,0.08))
                                     border.width: 1.5
@@ -2852,7 +3112,7 @@ Item {
                                         height: 30; width: 88
                                         radius: 6
                                         visible: !parent.parent.isActive
-                                        color: activateHov.containsMouse ? "#2a2826" : charcoal
+                                        color: activateHov.hovered ? "#2a2826" : charcoal
                                         Behavior on color { ColorAnimation { duration: 100 } }
                                         HoverHandler { id: activateHov }
 
@@ -2877,8 +3137,8 @@ Item {
                                     Rectangle {
                                         height: 30; width: 88
                                         radius: 6
-                                        visible: consoleViewModel && consoleViewModel.prompts.length > 1
-                                        color: delActionHov.containsMouse ? "#2a2826" : charcoal
+                                        visible: promptsBuilderCard.promptCount > 1
+                                        color: delActionHov.hovered ? "#2a2826" : charcoal
                                         Behavior on color { ColorAnimation { duration: 100 } }
                                         HoverHandler { id: delActionHov }
 
@@ -2986,7 +3246,7 @@ Item {
                                     width: 64
                                     height: 42
                                     radius: 6
-                                    color: addVocabHover.containsMouse ? Qt.rgba(0.078, 0.075, 0.071, 0.9) : charcoal
+                                    color: addVocabHover.hovered ? Qt.rgba(0.078, 0.075, 0.071, 0.9) : charcoal
                                     Behavior on color { ColorAnimation { duration: 150 } }
 
                                     Text {

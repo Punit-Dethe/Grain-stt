@@ -189,6 +189,62 @@ class _InstallWorker(QRunnable):
 
 
 # ---------------------------------------------------------------------------
+# Spawn worker — runs the blocking server launch OFF the Qt main thread
+# ---------------------------------------------------------------------------
+
+
+class _SpawnSignals(QObject):
+    # (process_or_None, error_reason). error_reason == "" on success.
+    finished = Signal(object, str)
+
+
+class _SpawnWorker(QRunnable):
+    """Performs the blocking parts of a server launch on a thread-pool thread.
+
+    The Qt main thread must never run the model-cache walk, ``netstat``/
+    ``taskkill`` or ``subprocess.Popen`` directly: together they block for
+    100-500 ms and freeze the Pill animation at the exact moment a recording
+    starts (when the on-demand Model_Load fires). This worker does that work
+    off-thread and reports back via ``finished``, delivered (queued) to a
+    main-thread slot which then starts the health poller.
+    """
+
+    def __init__(
+        self,
+        *,
+        cmd: list[str],
+        popen_kwargs: dict,
+        release_port,
+        check_cache,
+        signals: _SpawnSignals,
+    ) -> None:
+        super().__init__()
+        self._cmd = cmd
+        self._popen_kwargs = popen_kwargs
+        self._release_port = release_port
+        self._check_cache = check_cache
+        self._signals = signals
+        self.setAutoDelete(True)
+
+    def run(self) -> None:
+        try:
+            # Local-cache-only guard (R10.4): fail fast WITHOUT spawning when the
+            # model snapshot is absent. Done here so the filesystem walk never
+            # touches the main thread.
+            if self._check_cache is not None and not self._check_cache():
+                self._signals.finished.emit(None, "missing-cache")
+                return
+            # Kill any stale server still holding the port (netstat + taskkill +
+            # a short settle sleep) — the heaviest main-thread offender.
+            self._release_port()
+            proc = subprocess.Popen(self._cmd, **self._popen_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            self._signals.finished.emit(None, f"launch::{exc}")
+            return
+        self._signals.finished.emit(proc, "")
+
+
+# ---------------------------------------------------------------------------
 # Health poller
 # ---------------------------------------------------------------------------
 
@@ -290,6 +346,16 @@ class LocalSTTManager(QObject):
         self._is_loading: bool = False
         self._load_start_monotonic: float | None = None
         self._last_load_latency_ms: int | None = None
+
+        # Async spawn plumbing: the blocking launch work (cache check, stale-port
+        # release, Popen) runs on a thread-pool worker and reports back here, so
+        # the Qt main thread is never blocked during an on-demand Model_Load.
+        # finished is emitted from the worker thread → delivered queued to the
+        # main thread, where _on_spawn_finished starts the health poller.
+        self._spawn_signals = _SpawnSignals()
+        self._spawn_signals.finished.connect(self._on_spawn_finished)
+        self._pending_timeout_s: int = 30
+        self._pending_interval_s: float = 0.15
 
     # ------------------------------------------------------------------
     # Background pre-warming (reduces cold Model_Load latency)
@@ -499,10 +565,12 @@ class LocalSTTManager(QObject):
             return
 
         # Install-time / manual start: generous timeout because the model may still
-        # be downloading (~400 MB) and a relaxed poll interval is fine.
-        err = self._spawn_and_poll(timeout_s=300, interval_s=2.0, offline=False)
-        if err is not None:
-            self.server_crashed.emit(err)
+        # be downloading (~400 MB) and a relaxed poll interval is fine. The launch
+        # runs async (see _begin_spawn); a launch failure arrives via
+        # _on_spawn_finished → server_crashed.
+        self._begin_spawn(
+            timeout_s=300, interval_s=2.0, offline=False, check_cache=False
+        )
 
     # ------------------------------------------------------------------
     # On-demand Model_Load / Model_Unload (R8.2, R8.3, R8.6, R7.1, R7.2, R10.x)
@@ -534,23 +602,20 @@ class LocalSTTManager(QObject):
             self.server_ready.emit()
             return
 
-        # Local-cache-only load (R10.4): if the model snapshot is absent, fail fast
-        # and do NOT spawn so we never leave a partial-download / network-wait state.
-        if not self._model_cache_present():
-            self.load_failed.emit("missing-cache")
-            return
-
         # Clamp the configurable timeout to [10, 120] (default 30) via LoadLifecycle
         # so the manager and the pure model agree on the effective value (R7.2).
         timeout = LoadLifecycle.effective_timeout(timeout_s)
 
+        # Everything blocking — the local-cache-only guard (R10.4), stale-port
+        # release and Popen — runs on a worker thread (see _begin_spawn), so the
+        # Qt main thread (and therefore the Pill animation) is never blocked while
+        # a recording is starting. A missing cache / launch failure comes back via
+        # _on_spawn_finished → load_failed.
         self._is_loading = True
         self._load_start_monotonic = time.monotonic()
-        err = self._spawn_and_poll(timeout_s=timeout, interval_s=0.15, offline=True)
-        if err is not None:
-            self._is_loading = False
-            self._load_start_monotonic = None
-            self.load_failed.emit(err)
+        self._begin_spawn(
+            timeout_s=timeout, interval_s=0.15, offline=True, check_cache=True
+        )
 
     @Slot()
     def request_unload(self, delay_ms: int = 0) -> None:
@@ -582,15 +647,25 @@ class LocalSTTManager(QObject):
         if self._unload_timer.isActive():
             self._unload_timer.stop()
 
-    def _spawn_and_poll(
-        self, *, timeout_s: int, interval_s: float, offline: bool
-    ) -> str | None:
-        """Spawn the ASR server subprocess and start the health poller.
+    def _begin_spawn(
+        self, *, timeout_s: int, interval_s: float, offline: bool, check_cache: bool
+    ) -> None:
+        """Start an ASR server launch ASYNCHRONOUSLY.
 
-        Returns ``None`` on a successful launch, or a short error-reason string if
-        the process could not be launched. Shared by ``start()`` and ``load()``.
+        Sets status to ``starting`` and builds the (cheap) env + log handle on the
+        main thread, then offloads the BLOCKING work — the model-cache walk, the
+        stale-port release (``netstat``/``taskkill``/sleep) and ``subprocess.Popen``
+        — to a thread-pool worker. The main thread returns immediately, so the
+        Pill animation never freezes. Completion (or failure) is delivered to
+        ``_on_spawn_finished`` on the main thread, which starts the health poller.
+
+        ``check_cache`` is True for on-demand load (fail fast if the model
+        snapshot is absent) and False for the install-time start (the model is
+        downloaded on first run). Shared by ``start()`` and ``load()``.
         """
         self._set_status("starting")
+        self._pending_timeout_s = timeout_s
+        self._pending_interval_s = interval_s
 
         env = os.environ.copy()
         env["MODEL_ID"] = self._spec.id
@@ -618,9 +693,6 @@ class LocalSTTManager(QObject):
         except Exception:
             self._log_handle = None
 
-        # Kill any stale server from a previous session before binding the port.
-        self._release_stale_port()
-
         popen_kwargs: dict = {
             "cwd": str(_DATA_DIR),
             "env": env,
@@ -635,21 +707,71 @@ class LocalSTTManager(QObject):
             # CREATE_NO_WINDOW (0x08000000) prevents a console flash on Windows.
             popen_kwargs["creationflags"] = 0x00004000 | 0x08000000
 
-        try:
-            self._process = subprocess.Popen(
-                [str(_VENV_PYTHON), str(_SERVER_SCRIPT)],
-                **popen_kwargs,
-            )
-        except Exception as exc:
-            self._set_status("error")
-            return f"Could not launch server: {exc}"
+        worker = _SpawnWorker(
+            cmd=[str(_VENV_PYTHON), str(_SERVER_SCRIPT)],
+            popen_kwargs=popen_kwargs,
+            release_port=self._release_stale_port,
+            check_cache=(self._model_cache_present if check_cache else None),
+            signals=self._spawn_signals,
+        )
+        QThreadPool.globalInstance().start(worker)
 
-        poller = _HealthPoller(timeout_s=timeout_s, interval_s=interval_s)
+    @Slot(object, str)
+    def _on_spawn_finished(self, proc: object, error: str) -> None:
+        """Main-thread continuation of an async launch (see ``_begin_spawn``).
+
+        Runs on the main thread (queued delivery from the worker), so creating
+        and starting the ``_HealthPoller`` here keeps clean thread affinity.
+        """
+        # Superseded while we were spawning (stop()/uninstall flipped status):
+        # discard the result and clean up any orphaned process.
+        if self._status != "starting":
+            if proc is not None:
+                try:
+                    proc.terminate()  # type: ignore[union-attr]
+                except Exception:  # noqa: BLE001
+                    pass
+            self._close_log_handle()
+            return
+
+        if error:
+            was_loading = self._is_loading
+            self._is_loading = False
+            self._load_start_monotonic = None
+            self._set_status("error")
+            self._close_log_handle()
+            if error == "missing-cache":
+                # On-demand load against an absent snapshot (R10.4).
+                if was_loading:
+                    self.load_failed.emit("missing-cache")
+                else:
+                    self.server_crashed.emit("The local model files are missing.")
+            else:
+                reason = error[len("launch::"):] if error.startswith("launch::") else error
+                if was_loading:
+                    self.load_failed.emit("launch")
+                else:
+                    self.server_crashed.emit(f"Could not launch server: {reason}")
+            return
+
+        # Success: keep the process and begin health polling on the main thread.
+        self._process = proc  # type: ignore[assignment]
+        poller = _HealthPoller(
+            timeout_s=self._pending_timeout_s, interval_s=self._pending_interval_s
+        )
         poller.ready.connect(self._on_server_ready)
         poller.timed_out.connect(self._on_server_timeout)
         self._health_poller = poller
         poller.start()
-        return None
+
+    def _close_log_handle(self) -> None:
+        """Close the server-log file handle if open. Idempotent."""
+        if self._log_handle is not None:
+            try:
+                self._log_handle.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._log_handle = None
 
     @staticmethod
     def _cache_present_for(spec: ModelSpec) -> bool:
@@ -681,6 +803,35 @@ class LocalSTTManager(QObject):
         """True if *model_id*'s weights are downloaded (regardless of selection)."""
         return self._cache_present_for(registry.get_model(model_id))
 
+    @staticmethod
+    def cached_model_ids() -> set[str]:
+        """Return the ids of all registry models whose weights are cached.
+
+        Single-pass equivalent of calling ``is_model_cached`` for every model:
+        the expensive full recursive walk of the models dir runs ONCE here
+        instead of once per model. The settings UI reads the model catalog
+        (which needs every model's installed flag) on each status change — doing
+        N walks there stalled the Qt main thread during a load, when status
+        flips several times in quick succession.
+        """
+        result: set[str] = set()
+        try:
+            if not _MODELS_DIR.exists():
+                return result
+            # Materialise the directory listing once; reuse it for every spec.
+            directories = [d for d in _MODELS_DIR.rglob("*") if d.is_dir()]
+            for spec in registry.all_models():
+                fragment = spec.cache_dir_fragment.lower()
+                for directory in directories:
+                    if fragment and fragment not in directory.name.lower():
+                        continue
+                    if next(directory.rglob(spec.cache_weight_glob), None) is not None:
+                        result.add(spec.id)
+                        break
+        except Exception:
+            pass
+        return result
+
     def _model_cache_present(self) -> bool:
         """True if the SELECTED model's snapshot is present. Used to fail
         Model_Load fast with ``missing-cache`` instead of triggering a network
@@ -710,12 +861,7 @@ class LocalSTTManager(QObject):
                 self._process.kill()
             self._process = None
 
-        if self._log_handle is not None:
-            try:
-                self._log_handle.close()
-            except Exception:
-                pass
-            self._log_handle = None
+        self._close_log_handle()
 
         self._set_status("stopped")
         self.server_stopped.emit()

@@ -11,6 +11,7 @@ Implements Requirements 2.2, 2.3, 3.2, 3.3, 5.3, 6.3, 6.4, 7.3, 7.4.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import uuid
 from collections import deque
 from datetime import datetime, timedelta
@@ -291,6 +292,12 @@ class AppController(QObject):
         # Track which provider IDs have already been attempted this session
         self._stt_attempted_ids: set[str] = set()
         self._llm_attempted_ids: set[str] = set()
+        # Per-session API-key cache. get_key() is a synchronous OS credential
+        # store round-trip; the streaming path looked it up for EVERY chunk on
+        # the Qt main thread. Keys never change mid-recording, so memoize them
+        # per session (cleared on each session start so an edited key is picked
+        # up next time).
+        self._session_api_keys: dict[str, str | None] = {}
 
         # ── Streaming mode (10s rolling window, serialized to the server) ─────
         # Accumulated finalized transcript across chunks
@@ -340,8 +347,23 @@ class AppController(QObject):
         # Wire all services and signals in setup()
         # Two hotkeys: dictation hotkey and AI hotkey
         self._hotkey_service_ai = HotkeyService()  # second service for AI hotkey
+        # Batch (non-real-time) hotkey — always starts a record-then-transcribe
+        # session; the normal dictation hotkey streams live instead.
+        self._hotkey_service_batch = HotkeyService()
+        # Prompt-profile navigation hotkeys — cycle the active prompt backward /
+        # forward while recording a Voice-to-AI session.
+        self._hotkey_service_prompt_prev = HotkeyService()
+        self._hotkey_service_prompt_next = HotkeyService()
         # Track which hotkey started the current session
         self._session_mode: str = "dictation"  # "dictation" | "voice_to_ai"
+        # True when the current session uses the record-then-transcribe (batch)
+        # path AGAINST the local model — i.e. the local server must be loaded
+        # before the single-shot STT dispatch can run.
+        self._batch_local: bool = False
+        # True once a batch+local recording has finished but the model was not
+        # yet ready; the captured wav is dispatched as soon as _on_model_ready
+        # fires. Reset on every session start / discard / completion.
+        self._batch_local_pending: bool = False
 
         # Worker signals (single shared instance)
         self._worker_signals = _WorkerSignals()
@@ -379,6 +401,17 @@ class AppController(QObject):
         # Connect AI hotkey service
         self._hotkey_service_ai.hotkey_triggered.connect(self._on_hotkey_ai)
 
+        # Connect batch (non-real-time) hotkey service
+        self._hotkey_service_batch.hotkey_triggered.connect(self._on_hotkey_batch)
+
+        # Connect prompt-navigation hotkey services
+        self._hotkey_service_prompt_prev.hotkey_triggered.connect(
+            self._on_hotkey_prompt_prev
+        )
+        self._hotkey_service_prompt_next.hotkey_triggered.connect(
+            self._on_hotkey_prompt_next
+        )
+
         # Connect PillViewModel confirm button
         self.pill_vm.confirm_clicked.connect(self._on_confirm_clicked)
 
@@ -412,10 +445,19 @@ class AppController(QObject):
         """Called when the user saves settings. Re-registers hotkeys if changed."""
         old_hotkey = self._settings.hotkey
         old_hotkey_ai = self._settings.hotkey_ai
+        old_hotkey_batch = self._settings.hotkey_batch
+        old_prompt_prev = self._settings.hotkey_prompt_prev
+        old_prompt_next = self._settings.hotkey_prompt_next
         self._settings = settings
         self._router.update_settings(settings)
 
-        if settings.hotkey != old_hotkey or settings.hotkey_ai != old_hotkey_ai:
+        if (
+            settings.hotkey != old_hotkey
+            or settings.hotkey_ai != old_hotkey_ai
+            or settings.hotkey_batch != old_hotkey_batch
+            or settings.hotkey_prompt_prev != old_prompt_prev
+            or settings.hotkey_prompt_next != old_prompt_next
+        ):
             self._register_hotkeys()
 
     # ------------------------------------------------------------------
@@ -438,6 +480,20 @@ class AppController(QObject):
                 "Hotkey conflict",
                 f"Could not register AI hotkey '{self._settings.hotkey_ai}'.",
             )
+
+        ok3 = self._hotkey_service_batch.register(self._settings.hotkey_batch)
+        if not ok3:
+            self._notify(
+                "Hotkey conflict",
+                f"Could not register batch hotkey '{self._settings.hotkey_batch}'.",
+            )
+
+        # Prompt-navigation hotkeys are non-critical: they only do something
+        # while recording a Voice-to-AI session. Register quietly — a failure
+        # (e.g. the combo is claimed elsewhere) just means the user keeps using
+        # the quick panel to switch prompts, so we don't nag with a popup.
+        self._hotkey_service_prompt_prev.register(self._settings.hotkey_prompt_prev)
+        self._hotkey_service_prompt_next.register(self._settings.hotkey_prompt_next)
 
     # ------------------------------------------------------------------
     # Private — midnight quota reset
@@ -476,8 +532,13 @@ class AppController(QObject):
     # Private — session lifecycle
     # ------------------------------------------------------------------
 
-    def _start_recording(self) -> None:
-        """IDLE → RECORDING or STREAMING depending on STT provider."""
+    def _start_recording(self, force_batch: bool = False) -> None:
+        """IDLE → RECORDING or STREAMING depending on STT provider and mode.
+
+        ``force_batch`` (set by the dedicated batch hotkey) forces the
+        record-then-transcribe path even for the local model; every other start
+        key uses the real-time streaming path.
+        """
         self._session_id = str(uuid.uuid4())
         self._session_start = datetime.now()
         self._fallbacks = []
@@ -487,6 +548,7 @@ class AppController(QObject):
         self._wav_bytes = b""
         self._stt_attempted_ids = set()
         self._llm_attempted_ids = set()
+        self._session_api_keys = {}
         self._stream_transcript = ""
         self._stream_stt_latency_total_ms = 0
         self._stream_chunk_count = 0
@@ -496,6 +558,8 @@ class AppController(QObject):
         self._stream_last_error = ""
         self._stream_assembler.reset()
         self._stream_coverage_gaps = []
+        self._batch_local = False
+        self._batch_local_pending = False
         # New generation — any in-flight worker from a prior session is now stale.
         self._stream_generation += 1
 
@@ -508,16 +572,38 @@ class AppController(QObject):
         self._chunked_audio.set_conditioning(self._settings.process_audio)
         self._audio_service.set_conditioning(self._settings.process_audio)
 
+        # Rolling-window length for the real-time path: read per session so a
+        # settings change takes effect on the next recording without restart.
+        self._chunked_audio.set_rolling_window(self._settings.rolling_window_s)
+
         active_stt = self._active_stt_providers()
         self._stt_pool = ProviderPool(active_stt)
         self._llm_pool = ProviderPool(self._active_llm_providers())
 
         # Use the 10s rolling-window streaming path when the active provider
-        # is the local Parakeet server. This transcribes WHILE you speak so
-        # that pressing stop feels near-instant. Requests are SERIALIZED (one
-        # at a time) so the single-threaded local server is never overloaded.
-        # Cloud providers use single-shot record-then-send.
-        use_chunked = bool(active_stt) and _is_local_provider(active_stt[0])
+        # is the local Parakeet server AND real-time transcription is wanted for
+        # this session. This transcribes WHILE you speak so that pressing stop
+        # feels near-instant. Requests are SERIALIZED (one at a time) so the
+        # single-threaded local server is never overloaded.
+        #
+        # When the user turns real-time OFF (or fires the dedicated batch
+        # hotkey, which sets ``force_batch``), the local model instead uses the
+        # single-shot record-then-transcribe path: the whole take is sent in one
+        # request after recording stops. That trades the "instant on stop" feel
+        # for a chunk-boundary-free transcript. Cloud providers always use the
+        # single-shot path regardless of this setting.
+        # Real-time vs. batch is decided purely by WHICH hotkey started the
+        # session — there is no user toggle. The dedicated batch hotkey sets
+        # force_batch; every other start key is real-time. (We intentionally do
+        # NOT read settings.realtime_transcription here: a value persisted by the
+        # old toggle would otherwise strand users in batch mode with no UI to
+        # flip it back.)
+        local_active = bool(active_stt) and _is_local_provider(active_stt[0])
+        want_realtime = not force_batch
+        use_chunked = local_active and want_realtime
+        # The batch path runs against the LOCAL model: the server must be loaded
+        # before the single-shot STT dispatch (the streaming path loads it too).
+        self._batch_local = local_active and not use_chunked
 
         self.pill_vm.transcript_text = ""  # type: ignore[assignment]
         self.pill_vm.is_visible = True  # type: ignore[assignment]
@@ -555,6 +641,16 @@ class AppController(QObject):
                 self.pill_vm.is_visible = False  # type: ignore[assignment]
                 return
             self._set_state(SessionState.RECORDING)
+            # Batch path against the local model: warm the server NOW (while the
+            # user speaks) so it is ready by the time recording stops, hiding the
+            # load latency. The single-shot STT dispatch is gated on _model_ready
+            # in _on_capture_finished. Cloud-only batch sessions skip this.
+            if self._batch_local:
+                self._model_ready = False
+                self._load_failed = False
+                self._load_latency_ms = None
+                if self._local_stt_manager is not None:
+                    self._local_stt_manager.load(self._settings.local_stt_load_timeout_s)
 
     def _stop_recording_and_process(self) -> None:
         """Stop recording. For STREAMING: stop chunked audio (last chunk fires via signal).
@@ -576,21 +672,109 @@ class AppController(QObject):
 
     @Slot()
     def _on_hotkey_dictation(self) -> None:
-        """Dictation hotkey: start recording (dictation mode) or stop+paste."""
+        """Dictation hotkey: start a real-time session or stop+paste.
+
+        "What you end with wins" — the hotkey used to STOP decides the output.
+        Stopping here always finishes as raw dictation (paste), even if the
+        session was started with another key or promoted to voice_to_ai by a
+        mid-recording prompt-nav press. To send to the LLM, stop with the AI key.
+        """
         if self._state == SessionState.IDLE:
             self._session_mode = "dictation"
             self._start_recording()
         elif self._state in (SessionState.RECORDING, SessionState.STREAMING):
+            self._session_mode = "dictation"
             self._stop_recording_and_process()
 
     @Slot()
     def _on_hotkey_ai(self) -> None:
-        """AI hotkey: start recording (voice-to-AI mode) or stop+send to AI."""
+        """AI hotkey: start recording (voice-to-AI mode) or stop+send to AI.
+
+        "What you end with wins": stopping ANY in-progress session with this
+        hotkey promotes it to ``voice_to_ai``, so a dictation or batch recording
+        started with another key is sent to the LLM when finished here.
+        """
         if self._state == SessionState.IDLE:
             self._session_mode = "voice_to_ai"
             self._start_recording()
         elif self._state in (SessionState.RECORDING, SessionState.STREAMING):
+            self._session_mode = "voice_to_ai"
             self._stop_recording_and_process()
+
+    @Slot()
+    def _on_hotkey_batch(self) -> None:
+        """Batch hotkey: start a non-real-time (record-then-transcribe) session,
+        or stop+paste raw transcription.
+
+        Starting here ALWAYS forces the batch recording path. The output
+        destination still follows "what you end with wins": stop with this key
+        for raw text, or stop with the AI key to send the batch recording to
+        the LLM.
+        """
+        if self._state == SessionState.IDLE:
+            self._session_mode = "dictation"
+            self._start_recording(force_batch=True)
+        elif self._state in (SessionState.RECORDING, SessionState.STREAMING):
+            self._session_mode = "dictation"
+            self._stop_recording_and_process()
+
+    @Slot()
+    def _on_hotkey_prompt_prev(self) -> None:
+        """Prompt-nav hotkey: switch to the previous prompt profile."""
+        self._cycle_active_prompt(-1)
+
+    @Slot()
+    def _on_hotkey_prompt_next(self) -> None:
+        """Prompt-nav hotkey: switch to the next prompt profile."""
+        self._cycle_active_prompt(1)
+
+    def _cycle_active_prompt(self, direction: int) -> None:
+        """Cycle the active prompt profile by *direction* (-1 prev, +1 next).
+
+        Acts while ANY recording is in progress (dictation or Voice-to-AI).
+        Choosing a profile *is* the intent to process with AI, so the session
+        is promoted to ``voice_to_ai`` here: the selected prompt becomes the LLM
+        system prompt when the recording is stopped (see ``_build_system_prompt``).
+        That means the user can just start talking, pick "Email" mid-sentence,
+        and get an AI-styled result on stop — no separate AI hotkey needed. The
+        selection is persisted and surfaced on the pill via the "riser" overlay.
+        """
+        if self._state not in (SessionState.RECORDING, SessionState.STREAMING):
+            return
+
+        prompts = list(self._settings.prompts)
+        if len(prompts) < 2:
+            return  # nothing to cycle through
+
+        active_idx = next(
+            (i for i, p in enumerate(prompts) if p.is_active), 0
+        )
+        new_idx = (active_idx + direction) % len(prompts)
+        new_prompts = [
+            dataclasses.replace(p, is_active=(i == new_idx))
+            for i, p in enumerate(prompts)
+        ]
+        active = new_prompts[new_idx]
+
+        # Mirror set_active_prompt's behaviour: keep global_system_prompt in
+        # sync so the selection is consistent everywhere it's read.
+        self._settings = dataclasses.replace(
+            self._settings, prompts=new_prompts, global_system_prompt=active.text
+        )
+        # Picking a profile means "process this with AI" — promote the session
+        # so the chosen prompt is actually applied when recording stops, even if
+        # it began as a plain dictation session.
+        self._session_mode = "voice_to_ai"
+
+        # Persist so the choice survives and the settings UI reflects it on its
+        # next open. Best-effort: a disk error must never break the recording.
+        try:
+            self._settings_store.save(self._settings)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Reveal the prompt name on the pill (the riser auto-hides in QML).
+        self.pill_vm.pulse_prompt_nav(active.name)
 
     @Slot()
     def _on_confirm_clicked(self) -> None:
@@ -604,7 +788,21 @@ class AppController(QObject):
 
     @Slot(bytes)
     def _on_capture_finished(self, wav_bytes: bytes) -> None:
+        # capture_finished only matters while we're processing a stop. If the
+        # session was already discarded (e.g. a fail-fast local load error fired
+        # mid-recording), ignore the late buffer instead of dispatching it.
+        if self._state != SessionState.PROCESSING:
+            return
         self._wav_bytes = wav_bytes
+        # Batch path against the local model: the server may still be loading
+        # (started at record-start). Defer the single-shot dispatch until the
+        # model is ready — _on_model_ready picks it up. If the load already
+        # failed, _on_model_load_failed has discarded the session, so bail.
+        if self._batch_local and not self._model_ready:
+            if self._load_failed:
+                return
+            self._batch_local_pending = True
+            return
         self._dispatch_stt()
 
     # ------------------------------------------------------------------
@@ -663,7 +861,7 @@ class AppController(QObject):
 
         chunk = self._stream_queue.popleft()
         provider = self._settings.stt_providers[0]
-        api_key = self._credential_store.get_key(provider.id)
+        api_key = self._api_key(provider.id)
         self._stream_busy = True
         self._stt_start = datetime.now()
 
@@ -685,6 +883,13 @@ class AppController(QObject):
         self._model_ready = True
         if self._local_stt_manager is not None:
             self._load_latency_ms = self._local_stt_manager.last_load_latency_ms
+        # Batch+local: if recording already finished while the model was loading,
+        # the captured wav is waiting — dispatch it now via the single-shot path.
+        if self._batch_local:
+            if self._batch_local_pending:
+                self._batch_local_pending = False
+                self._dispatch_stt()
+            return
         self._pump_stream_queue()
 
     @Slot(str)
@@ -932,6 +1137,19 @@ class AppController(QObject):
     # Private — provider selection
     # ------------------------------------------------------------------
 
+    def _api_key(self, provider_id: str) -> str | None:
+        """Return the provider's API key, memoized for the current session.
+
+        Avoids a synchronous OS credential-store round-trip on every lookup —
+        notably the streaming path, which fetched a key per audio chunk on the
+        Qt main thread. The cache is reset at each session start.
+        """
+        if provider_id not in self._session_api_keys:
+            self._session_api_keys[provider_id] = self._credential_store.get_key(
+                provider_id
+            )
+        return self._session_api_keys[provider_id]
+
     def _active_stt_providers(self) -> list:
         """Return the providers that should be used for routing this session.
 
@@ -1002,7 +1220,7 @@ class AppController(QObject):
         self._stt_attempted_ids.add(provider.id)
         self._stt_provider = provider
         self._stt_start = datetime.now()
-        api_key = self._credential_store.get_key(provider.id)
+        api_key = self._api_key(provider.id)
         worker = _STTWorker(
             self._stt_client, provider, self._wav_bytes, api_key, self._worker_signals
         )
@@ -1144,7 +1362,7 @@ class AppController(QObject):
         self._llm_attempted_ids.add(provider.id)
         self._llm_provider = provider
         self._llm_start = datetime.now()
-        api_key = self._credential_store.get_key(provider.id)
+        api_key = self._api_key(provider.id)
         worker = _LLMWorker(
             self._llm_client,
             provider,
@@ -1339,6 +1557,8 @@ class AppController(QObject):
         self._stream_generation += 1
         self._stream_busy = False
         self._stream_queue.clear()
+        self._batch_local = False
+        self._batch_local_pending = False
         self._set_state(SessionState.IDLE)
 
     def _discard_session(self) -> None:
@@ -1354,6 +1574,8 @@ class AppController(QObject):
         self._stream_generation += 1
         self._stream_busy = False
         self._stream_queue.clear()
+        self._batch_local = False
+        self._batch_local_pending = False
         self._set_state(SessionState.IDLE)
 
     # ------------------------------------------------------------------

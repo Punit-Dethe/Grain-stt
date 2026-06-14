@@ -328,6 +328,13 @@ def main() -> None:
             return
         doomed = _assist_engine
         _assist_engine = None
+        # Run the V4 JS-heap GC before teardown (complements clearComponentCache;
+        # mirrors the pill load path's trimComponentCache + collectGarbage pair)
+        # so QML/JS objects are reclaimed rather than waiting on a later GC tick.
+        try:
+            doomed.collectGarbage()
+        except Exception:
+            pass
         try:
             doomed.clearComponentCache()
         except Exception:
@@ -375,6 +382,13 @@ def main() -> None:
         if _console_engine is not None:
             doomed = _console_engine
             _console_engine = None  # release Python reference immediately
+            # Run the V4 JS-heap GC before teardown (complements
+            # clearComponentCache; mirrors the pill load path) so the console's
+            # QML/JS objects are reclaimed promptly instead of on a later tick.
+            try:
+                doomed.collectGarbage()
+            except Exception:
+                pass
             try:
                 doomed.clearComponentCache()
             except Exception:
@@ -533,6 +547,18 @@ def main() -> None:
 
     # Stop local STT cleanly when app quits
     app.aboutToQuit.connect(local_mgr.stop)
+
+    # Load-on-startup: when the user has opted in AND the engine is installed,
+    # pre-warm the selected model at launch so the first dictation is instant
+    # instead of paying the cold Model_Load latency. Deferred so the tray/UI
+    # come up first; load() is async and cache-guarded, so a missing snapshot or
+    # an uninstalled engine is a safe no-op. Unloading still follows the idle
+    # policy (a session end arms request_unload), so this only changes WHEN the
+    # first load happens, not whether the model is eventually released.
+    if settings.local_stt_load_on_startup and local_mgr.is_installed():
+        QTimer.singleShot(
+            800, lambda: local_mgr.load(settings.local_stt_load_timeout_s)
+        )
 
     # ------------------------------------------------------------------
     # 11. Open console on startup when the user has disabled "Launch Minimized"

@@ -468,7 +468,9 @@ Rectangle {
                         opacity: root.smartRotation ? 0.45 : 1.0
                         Behavior on opacity { NumberAnimation { duration: 150 } }
 
-                        // Real-time — locked ON, coming soon
+                        // Launch on startup — pre-load the selected local model
+                        // at app launch. Wired to the shared view model; stays in
+                        // sync with the advanced panel's "Load on Startup" row.
                         Rectangle {
                             Layout.fillWidth: true; height: 52; radius: 8
                             color: theme.fill(0.04); border.color: theme.fill(0.05); border.width: 1
@@ -476,14 +478,18 @@ Rectangle {
                                 anchors.fill: parent; anchors.margins: 10
                                 ColumnLayout {
                                     anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; spacing: 2
-                                    Text { text: "Real-time"; font.pixelSize: 11; font.bold: true; color: theme.ink(0.85) }
-                                    Text { text: "coming soon"; font.family: "JetBrains Mono"; font.pixelSize: 8; color: theme.ink(0.4) }
+                                    Text { text: "Launch"; font.pixelSize: 11; font.bold: true; color: theme.ink(0.85) }
+                                    Text { text: "Load on start"; font.family: "JetBrains Mono"; font.pixelSize: 8; color: theme.ink(0.45) }
                                 }
                                 MechanicalToggle {
                                     trackColor: theme.toggleTrack
                                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                    checked: true
-                                    onToggled: { if (!checked) checked = true }
+                                    value: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                        ? consoleViewModel.local_stt_load_on_startup : false
+                                    onToggled: {
+                                        if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                            consoleViewModel.save_load_on_startup(checked)
+                                    }
                                 }
                             }
                         }

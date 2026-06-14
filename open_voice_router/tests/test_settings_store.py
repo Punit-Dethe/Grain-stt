@@ -167,6 +167,70 @@ def test_save_is_atomic(tmp_path: Path) -> None:
     assert "active_mode" in parsed
 
 
+def test_load_on_startup_round_trips(tmp_path: Path) -> None:
+    """The local_stt_load_on_startup flag should survive a save/load round-trip."""
+    config_file = tmp_path / "settings.json"
+    store = SettingsStore(path=config_file)
+
+    settings = replace(AppSettings.defaults(), local_stt_load_on_startup=True)
+    store.save(settings)
+
+    assert store.load().local_stt_load_on_startup is True
+
+
+def test_prompt_migration_replaces_clean_and_format(tmp_path: Path) -> None:
+    """A legacy file (General + unmodified Clean & Format) migrates to
+    General + Email + Coding, with exactly one active prompt."""
+    from open_voice_router.storage.settings_store import _LEGACY_CLEAN_FORMAT_PROMPT
+
+    config_file = tmp_path / "settings.json"
+    legacy = {
+        "active_mode": "dictation",
+        "hotkey": "ctrl+shift+space",
+        "microphone_device_id": None,
+        "stt_providers": [],
+        "llm_providers": [],
+        "log_file_path": "x.jsonl",
+        "prompts": [
+            {"id": "g", "name": "General", "text": "<role_definition>x", "is_active": False},
+            {"id": "c", "name": "Clean & Format", "text": _LEGACY_CLEAN_FORMAT_PROMPT, "is_active": True},
+        ],
+    }
+    config_file.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = SettingsStore(path=config_file).load()
+    names = [p.name for p in loaded.prompts]
+
+    assert names == ["General", "Email", "Coding"]
+    assert "Clean & Format" not in names
+    # The dropped prompt was active → General becomes the single active one.
+    assert [p.name for p in loaded.prompts if p.is_active] == ["General"]
+
+
+def test_prompt_migration_keeps_customized_clean_and_format(tmp_path: Path) -> None:
+    """A user-customised 'Clean & Format' is preserved (not retired)."""
+    config_file = tmp_path / "settings.json"
+    legacy = {
+        "active_mode": "dictation",
+        "hotkey": "ctrl+shift+space",
+        "microphone_device_id": None,
+        "stt_providers": [],
+        "llm_providers": [],
+        "log_file_path": "x.jsonl",
+        "prompts": [
+            {"id": "g", "name": "General", "text": "<role_definition>x", "is_active": True},
+            {"id": "c", "name": "Clean & Format", "text": "my own edited prompt", "is_active": False},
+        ],
+    }
+    config_file.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = SettingsStore(path=config_file).load()
+    names = [p.name for p in loaded.prompts]
+
+    assert "Clean & Format" in names
+    assert names == ["General", "Clean & Format", "Email", "Coding"]
+
+
 # ---------------------------------------------------------------------------
 # local_stt_load_timeout_s validation (R7.2)
 # ---------------------------------------------------------------------------
@@ -367,3 +431,92 @@ def test_local_stt_model_missing_key_falls_back_to_default(tmp_path: Path) -> No
     del data["local_stt_model_id"]
     config_file.write_text(json.dumps(data), encoding="utf-8")
     assert store.load().local_stt_model_id == registry.DEFAULT_MODEL_ID
+
+
+# ---------------------------------------------------------------------------
+# hotkey_batch (non-real-time / record-then-transcribe start key)
+# ---------------------------------------------------------------------------
+
+
+def test_hotkey_batch_default() -> None:
+    """The batch hotkey has a sensible default binding."""
+    assert AppSettings.defaults().hotkey_batch == "ctrl+shift+z"
+
+
+def test_hotkey_batch_round_trip(tmp_path: Path) -> None:
+    """A non-default batch hotkey survives a save/load cycle."""
+    store = SettingsStore(path=tmp_path / "settings.json")
+    settings = AppSettings.defaults()
+    settings.hotkey_batch = "ctrl+alt+b"
+    store.save(settings)
+
+    assert store.load().hotkey_batch == "ctrl+alt+b"
+
+
+def test_hotkey_batch_missing_key_uses_default(tmp_path: Path) -> None:
+    """A settings file predating the batch hotkey loads with its default."""
+    config_file = tmp_path / "settings.json"
+    store = SettingsStore(path=config_file)
+    store.save(AppSettings.defaults())
+    data = json.loads(config_file.read_text(encoding="utf-8"))
+    data.pop("hotkey_batch", None)
+    config_file.write_text(json.dumps(data), encoding="utf-8")
+
+    assert store.load().hotkey_batch == "ctrl+shift+z"
+
+
+# ---------------------------------------------------------------------------
+# rolling_window_s validation (real-time chunk length, [15, 60] default 20)
+# ---------------------------------------------------------------------------
+
+
+def test_rolling_window_defaults_to_20() -> None:
+    assert AppSettings.defaults().rolling_window_s == 20
+
+
+@pytest.mark.parametrize("value", [15, 20, 30, 45, 60])
+def test_rolling_window_in_range_round_trip(tmp_path: Path, value: int) -> None:
+    store = SettingsStore(path=tmp_path / "settings.json")
+    settings = AppSettings.defaults()
+    settings.rolling_window_s = value
+    store.save(settings)
+    assert store.load().rolling_window_s == value
+
+
+def _write_settings_with_rolling_window(config_file: Path, value: object) -> None:
+    defaults = AppSettings.defaults()
+    data = {
+        "active_mode": defaults.active_mode,
+        "hotkey": defaults.hotkey,
+        "microphone_device_id": None,
+        "stt_providers": [],
+        "llm_providers": [],
+        "log_file_path": defaults.log_file_path,
+        "rolling_window_s": value,
+    }
+    config_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.mark.parametrize("bad_value", [14, 0, -5, 61, 1000, "20", 20.0, None, True])
+def test_rolling_window_invalid_falls_back_to_default(
+    tmp_path: Path, bad_value: object
+) -> None:
+    config_file = tmp_path / "settings.json"
+    _write_settings_with_rolling_window(config_file, bad_value)
+    assert SettingsStore(path=config_file).load().rolling_window_s == 20
+
+
+@pytest.mark.parametrize("boundary", [15, 60])
+def test_rolling_window_boundaries_accepted(tmp_path: Path, boundary: int) -> None:
+    config_file = tmp_path / "settings.json"
+    _write_settings_with_rolling_window(config_file, boundary)
+    assert SettingsStore(path=config_file).load().rolling_window_s == boundary
+
+
+def test_rolling_window_missing_field_uses_default(tmp_path: Path) -> None:
+    config_file = tmp_path / "settings.json"
+    _write_settings_with_rolling_window(config_file, 30)
+    data = json.loads(config_file.read_text(encoding="utf-8"))
+    del data["rolling_window_s"]
+    config_file.write_text(json.dumps(data), encoding="utf-8")
+    assert SettingsStore(path=config_file).load().rolling_window_s == 20

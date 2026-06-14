@@ -46,6 +46,20 @@ def _collect_chunks(svc):
     return chunks
 
 
+def test_set_rolling_window_sets_max_frames(svc):
+    svc.set_rolling_window(30)
+    assert svc._max_frames == 30 * ca._FRAMES_PER_SECOND
+
+
+@pytest.mark.parametrize(
+    "given,expected_s",
+    [(5, 15), (14, 15), (15, 15), (60, 60), (120, 60), (10.0, 15)],
+)
+def test_set_rolling_window_clamps(svc, given, expected_s):
+    svc.set_rolling_window(given)
+    assert svc._max_frames == expected_s * ca._FRAMES_PER_SECOND
+
+
 def test_slice_is_frame_exact(svc):
     with svc._lock:
         svc._all_blocks = [_block(100), _block(100), _block(100)]
@@ -140,6 +154,58 @@ def test_no_frames_dropped_across_chunk_and_stop(svc):
     # The tail must cover from cursor(12s) - overlap(2s) to 25s = 15s.
     tail_frames = _wav_frame_count(chunks[1])
     assert tail_frames == (25 - 12 + 2) * fps
+
+
+def _reference_slice(blocks, start_frame, end_frame):
+    """Full-scan reference slicer (the pre-optimization algorithm) — used to
+    prove the cached-cursor version returns byte-identical frames."""
+    if end_frame <= start_frame:
+        return []
+    out = []
+    pos = 0
+    for blk in blocks:
+        blk_len = blk.shape[0]
+        blk_start, blk_end = pos, pos + blk_len
+        pos = blk_end
+        if blk_end <= start_frame:
+            continue
+        if blk_start >= end_frame:
+            break
+        lo = max(0, start_frame - blk_start)
+        hi = min(blk_len, end_frame - blk_start)
+        if hi > lo:
+            out.append(blk[lo:hi] if (lo != 0 or hi != blk_len) else blk)
+    return out
+
+
+def test_cursor_slice_matches_full_scan_over_long_session(svc):
+    """The cached-cursor slicer must return exactly the same frames as a full
+    scan for a long sequence of forward-moving ranges (the production pattern)."""
+    import numpy as np
+
+    # 1000 blocks of varying lengths — a long session.
+    rng = np.random.default_rng(7)
+    blocks = [_block(int(n), value=int(v))
+              for n, v in zip(rng.integers(700, 900, size=1000),
+                              rng.integers(-5000, 5000, size=1000))]
+    with svc._lock:
+        svc._all_blocks = blocks
+        svc._total_frames = sum(b.shape[0] for b in blocks)
+
+    # Walk forward in overlapping windows, exactly like emit/stop do.
+    cursor = 0
+    step = 800 * 20  # ~20s of unsent audio per chunk
+    overlap = ca._OVERLAP_FRAMES
+    while cursor < svc._total_frames:
+        end = min(cursor + step, svc._total_frames)
+        start = max(0, cursor - overlap)
+        with svc._lock:
+            got = svc._slice_frames_locked(start, end)
+        ref = _reference_slice(blocks, start, end)
+        got_cat = np.concatenate(got) if got else np.empty((0, 1), np.int16)
+        ref_cat = np.concatenate(ref) if ref else np.empty((0, 1), np.int16)
+        assert np.array_equal(got_cat, ref_cat), f"mismatch at [{start},{end})"
+        cursor = end
 
 
 def test_chunks_carry_exact_timeline_metadata(svc):

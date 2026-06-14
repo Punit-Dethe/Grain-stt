@@ -123,6 +123,12 @@ class ChunkedAudioService(QObject):
         self._total_frames: int = 0
         # Absolute cursor: number of leading frames already dispatched.
         self._sent_frames: int = 0
+        # Slice scan cursor: (block index, absolute frame at that block's start)
+        # marking the earliest block any future slice can need. Chunk ranges
+        # only move forward (the send cursor advances), so _slice_frames_locked
+        # resumes here instead of rescanning the whole growing block list from 0.
+        self._scan_idx: int = 0
+        self._scan_frame: int = 0
         # Frames of contiguous trailing silence (raw RMS based).
         self._silence_frames: int = 0
 
@@ -133,6 +139,12 @@ class ChunkedAudioService(QObject):
         # counts, so the absolute cursor timeline is unaffected.
         self._conditioning_enabled: bool = True
         self._conditioner = AudioConditioner(sample_rate=SAMPLE_RATE)
+
+        # Rolling-window hard-cut threshold (frames). Defaults to the module
+        # constant; AppController overrides it per session from the persisted
+        # rolling_window_s setting via set_rolling_window(). Larger = fewer chunk
+        # boundaries (better accuracy), smaller = lower flush latency on stop.
+        self._max_frames: int = _MAX_FRAMES
 
         self._amplitude_ready.connect(self.amplitude_changed, Qt.ConnectionType.QueuedConnection)
         self._chunk_ready_internal.connect(self.chunk_ready, Qt.ConnectionType.QueuedConnection)
@@ -150,6 +162,16 @@ class ChunkedAudioService(QObject):
         """
         self._conditioning_enabled = bool(enabled)
 
+    def set_rolling_window(self, seconds: float) -> None:
+        """Set the rolling-window hard-cut length (seconds) for the NEXT session.
+
+        Called by AppController from the persisted rolling_window_s setting
+        before each session starts — never mid-recording. Clamped to [15, 60]
+        defensively so a bad value can never produce a degenerate chunk size.
+        """
+        clamped = max(15.0, min(60.0, float(seconds)))
+        self._max_frames = int(clamped * _FRAMES_PER_SECOND)
+
     def reset(self) -> None:
         """Clear all state so a new session starts completely fresh."""
         with self._lock:
@@ -157,6 +179,8 @@ class ChunkedAudioService(QObject):
             self._total_frames = 0
             self._sent_frames = 0
             self._silence_frames = 0
+            self._scan_idx = 0
+            self._scan_frame = 0
         self._smoothed_amplitude = 0.0
         self._conditioner.reset()
 
@@ -168,6 +192,8 @@ class ChunkedAudioService(QObject):
             self._total_frames = 0
             self._sent_frames = 0
             self._silence_frames = 0
+            self._scan_idx = 0
+            self._scan_frame = 0
         self._smoothed_amplitude = 0.0
         self._conditioner.reset()
 
@@ -297,8 +323,8 @@ class ChunkedAudioService(QObject):
 
             unsent = self._total_frames - self._sent_frames
             should_finalize = (
-                # Hard cut: too much unsent audio.
-                unsent >= _MAX_FRAMES
+                # Hard cut: too much unsent audio (per-session rolling window).
+                unsent >= self._max_frames
                 or
                 # Early finalize: enough unsent speech + a silence gap.
                 (
@@ -354,15 +380,44 @@ class ChunkedAudioService(QObject):
         """
         if end_frame <= start_frame:
             return []
+        blocks = self._all_blocks
+        n = len(blocks)
+
+        # Resume the scan from the cached cursor when this range begins at or
+        # after it — the production call pattern, since the send cursor only
+        # advances. If a caller ever requests an EARLIER range (or the block
+        # list shrank below the cursor), fall back to a full scan from 0 so
+        # correctness never relies on the monotonicity assumption.
+        if self._scan_idx <= n and self._scan_frame <= start_frame:
+            idx = self._scan_idx
+            pos = self._scan_frame
+        else:
+            idx = 0
+            pos = 0
+
+        # Skip blocks entirely before the range, persisting how far we got so
+        # the next (forward) slice doesn't re-walk them. Amortized O(1) per
+        # block across the whole session instead of O(blocks) per chunk.
+        while idx < n:
+            blk_len = blocks[idx].shape[0]
+            if pos + blk_len <= start_frame:
+                pos += blk_len
+                idx += 1
+            else:
+                break
+        self._scan_idx = idx
+        self._scan_frame = pos
+
+        # Collect the blocks overlapping [start_frame, end_frame), sliced exactly
+        # at the boundaries (identical to the original full-scan output).
         out: list[np.ndarray] = []
-        pos = 0  # absolute frame index of the start of the current block
-        for blk in self._all_blocks:
+        scan_pos = pos
+        for j in range(idx, n):
+            blk = blocks[j]
             blk_len = blk.shape[0]
-            blk_start = pos
-            blk_end = pos + blk_len
-            pos = blk_end
-            if blk_end <= start_frame:
-                continue  # entirely before the range
+            blk_start = scan_pos
+            blk_end = scan_pos + blk_len
+            scan_pos = blk_end
             if blk_start >= end_frame:
                 break     # entirely after the range
             lo = max(0, start_frame - blk_start)

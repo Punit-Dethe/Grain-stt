@@ -168,3 +168,28 @@ def test_cache_detection_missing_dir(tmp_path, monkeypatch):
     assert mgr.LocalSTTManager._cache_present_for(
         registry.get_model(registry.DEFAULT_MODEL_ID)
     ) is False
+
+
+def test_cached_model_ids_matches_per_model(tmp_path, monkeypatch):
+    """The single-walk cached_model_ids() must agree, model-for-model, with
+    the per-model _cache_present_for() it replaces in the UI hot path."""
+    import open_voice_router.services.local_stt_manager as mgr
+
+    # Two distinct snapshots present (Parakeet v3 + faster-whisper base).
+    p_snap = tmp_path / "models--istupakov--parakeet-tdt-0.6b-v3-onnx" / "snapshots" / "a"
+    p_snap.mkdir(parents=True)
+    (p_snap / "encoder.int8.onnx").write_bytes(b"\x00")
+    w_snap = tmp_path / "models--Systran--faster-whisper-base" / "snapshots" / "b"
+    w_snap.mkdir(parents=True)
+    (w_snap / "model.bin").write_bytes(b"\x00")
+    monkeypatch.setattr(mgr, "_MODELS_DIR", tmp_path)
+
+    expected = {
+        m.id
+        for m in registry.all_models()
+        if mgr.LocalSTTManager._cache_present_for(m)
+    }
+    assert mgr.LocalSTTManager.cached_model_ids() == expected
+    # Sanity: at least the two we seeded are present.
+    assert "parakeet-tdt-0.6b-v3" in expected
+    assert "whisper-base-ct2" in expected
