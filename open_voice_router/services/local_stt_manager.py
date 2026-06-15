@@ -38,6 +38,12 @@ import threading
 import time
 from pathlib import Path
 
+# Windows: keep every child process windowless. Console apps (python -m venv,
+# pip, the ASR server, netstat/taskkill) otherwise flash a command-prompt
+# window. 0 on other platforms so the kwarg is a harmless no-op.
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+BELOW_NORMAL_PRIORITY_CLASS = 0x00004000 if sys.platform == "win32" else 0
+
 import platformdirs
 from PySide6.QtCore import (
     QObject,
@@ -150,6 +156,7 @@ class _InstallWorker(QRunnable):
                 [_find_system_python(), "-m", "venv", str(_VENV_DIR)],
                 capture_output=True,
                 text=True,
+                creationflags=CREATE_NO_WINDOW,
             )
             if result.returncode != 0:
                 raise RuntimeError(f"venv creation failed:\n{result.stderr[-1000:]}")
@@ -183,6 +190,7 @@ class _InstallWorker(QRunnable):
             [str(_VENV_PYTHON), "-m", "pip"] + args,
             capture_output=True,
             text=True,
+            creationflags=CREATE_NO_WINDOW,
         )
         if result.returncode != 0:
             raise RuntimeError(f"pip {args[0]} failed:\n{result.stderr[-2000:]}")
@@ -451,8 +459,11 @@ class LocalSTTManager(QObject):
                 "timeout": 120,
             }
             if sys.platform == "win32":
-                # BELOW_NORMAL_PRIORITY_CLASS — preempted by any foreground work.
-                kwargs["creationflags"] = 0x00004000
+                # Below-normal priority (preempted by foreground work) AND
+                # windowless so the warm-up flash never appears at launch.
+                kwargs["creationflags"] = (
+                    BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW
+                )
 
             modules = self._spec.import_check_modules
             if not modules:

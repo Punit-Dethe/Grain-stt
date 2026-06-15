@@ -59,6 +59,10 @@ import shutil
 import uuid
 import subprocess
 import datetime
+
+# Windowless child processes on Windows — ffmpeg/ffprobe are console apps and
+# would each flash a command-prompt window when called from this hidden server.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 import wave
 import numpy as np
 from typing import List, Tuple, Optional
@@ -182,7 +186,8 @@ def get_audio_duration(file_path):
     command = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                "-of", "default=noprint_wrappers=1:nokey=1", file_path]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        result = subprocess.run(command, capture_output=True, text=True, check=True,
+                                creationflags=_NO_WINDOW)
         return float(result.stdout)
     except Exception:
         return 0.0
@@ -240,7 +245,8 @@ def detect_silence_points(file_path, silence_thresh=SILENCE_THRESHOLD,
                "-f", "null", "-"]
     try:
         result = subprocess.run(command, capture_output=True, text=True,
-                                timeout=SILENCE_DETECT_TIMEOUT)
+                                timeout=SILENCE_DETECT_TIMEOUT,
+                                creationflags=_NO_WINDOW)
         silence_points = []
         silence_start = None
         for line in result.stderr.splitlines():
@@ -403,7 +409,8 @@ def transcribe_audio():
                 "-i", temp_original_path, "-ac", "1", "-ar", "16000",
                 "-c:a", "pcm_s16le", target_wav_path,
             ]
-            result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
+            result = subprocess.run(ffmpeg_command, capture_output=True, text=True,
+                                    creationflags=_NO_WINDOW)
             if result.returncode != 0:
                 return jsonify({"error": "File conversion failed", "details": result.stderr}), 500
             temp_files_to_clean.append(target_wav_path)
@@ -450,7 +457,8 @@ def transcribe_audio():
                     "-ss", str(chunk_boundaries[i]), "-t", str(chunk_durations[i]),
                     "-i", target_wav_path, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", piece_path,
                 ]
-                subprocess.run(chunk_command, capture_output=True, text=True)
+                subprocess.run(chunk_command, capture_output=True, text=True,
+                               creationflags=_NO_WINDOW)
                 piece_info = get_wav_info(piece_path)
                 piece_wave = (
                     load_pcm_wav_as_16k_float(piece_path, piece_info)
