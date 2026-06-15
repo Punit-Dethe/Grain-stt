@@ -26,6 +26,7 @@ if sys.platform == "win32":
 
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _user32.CallNextHookEx.restype = ctypes.c_longlong  # LRESULT = 64-bit on x64
 
     # Hook type and message constants
     WH_KEYBOARD_LL = 13
@@ -50,8 +51,10 @@ if sys.platform == "win32":
             ("dwExtraInfo", ctypes.c_ulong),
         ]
 
+    # LRESULT is LONG_PTR — 64-bit on 64-bit Windows.  Using c_long (32-bit)
+    # truncates the return value and corrupts the hook chain on x64 builds.
     _HOOKPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
+        ctypes.c_longlong,
         ctypes.c_int,
         ctypes.wintypes.WPARAM,
         ctypes.wintypes.LPARAM,
@@ -142,17 +145,22 @@ if sys.platform == "win32":
     _hook_proc_ref: object = None   # prevent GC of ctypes callback
 
     def _low_level_proc(nCode: int, wParam: int, lParam: int) -> int:
-        if nCode == HC_ACTION and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-            event = ctypes.cast(lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
-            vk = event.vkCode
-            with _lock:
-                for mod_set, req_vk, svc in _registered:
-                    if vk != req_vk:
-                        continue
-                    if all(_mod_held(m) for m in mod_set):
+        # CRITICAL: this function MUST always return CallNextHookEx or the key
+        # is eaten and Windows keyboard processing stalls for every user keypress.
+        try:
+            if nCode == HC_ACTION and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                event = ctypes.cast(lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
+                vk = event.vkCode
+                # Copy the list under lock so we don't hold it during key-state reads.
+                with _lock:
+                    snapshot = list(_registered)
+                for mod_set, req_vk, svc in snapshot:
+                    if vk == req_vk and all(_mod_held(m) for m in mod_set):
                         svc.hotkey_triggered.emit()
-                        return 1   # suppress key — prevents Windows from acting on it
-        return _user32.CallNextHookEx(None, nCode, wParam, lParam)
+                        return 1  # suppress — only matched hotkeys are eaten
+        except Exception:
+            pass  # never block the hook chain on a Python error
+        return _user32.CallNextHookEx(_hook_handle, nCode, wParam, lParam)
 
     def _hook_thread_main() -> None:
         global _hook_handle, _hook_thread_id, _hook_proc_ref
