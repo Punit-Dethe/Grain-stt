@@ -585,7 +585,10 @@ Rectangle {
                                 RowLayout {
                                     anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
                                     Text { text: modelData.time; font.family: "JetBrains Mono"; font.pixelSize: 8; color: theme.ink(0.4); Layout.alignment: Qt.AlignVCenter }
-                                    Text { text: modelData.text; font.family: "JetBrains Mono"; font.pixelSize: 9; color: theme.ink(0.85); elide: Text.ElideRight; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter }
+                                    // Collapse newlines/runs of whitespace so a formatted result
+                                    // (e.g. an email with blank lines) stays a single-line preview
+                                    // instead of expanding the row and overflowing it.
+                                    Text { text: (modelData.text || "").replace(/\s+/g, " ").trim(); font.family: "JetBrains Mono"; font.pixelSize: 9; color: theme.ink(0.85); wrapMode: Text.NoWrap; maximumLineCount: 1; elide: Text.ElideRight; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter }
                                 }
                             }
                         }
