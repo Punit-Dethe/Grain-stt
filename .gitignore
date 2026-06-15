@@ -60,6 +60,10 @@ node_modules/
 # ── Misc artefacts ───────────────────────────────────────────────────────────
 insp/
 Plan
+image.png
+RELEASE.md
+build_log*.txt
+iscc_log.txt
 
 # ── AI / IDE tool configs (not for public repo) ───────────────────────────────
 .claude/
