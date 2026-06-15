@@ -28,8 +28,8 @@ from PySide6.QtCore import QObject, QTimer
 from PySide6.QtGui import QClipboard
 from PySide6.QtWidgets import QApplication
 
-# Modifier keys that would corrupt a simulated Ctrl+C if still held.
-_MODIFIER_KEYS = ("ctrl", "shift", "alt", "windows", "left windows", "right windows")
+from open_voice_router.services import winput
+
 _MODIFIER_RELEASE_TIMEOUT_MS = 1200
 _POLL_INTERVAL_MS = 35
 # How long to wait for the target app to service the Ctrl+C.
@@ -78,17 +78,7 @@ class SelectionService(QObject):
 
     @staticmethod
     def _modifiers_held() -> bool:
-        try:
-            import keyboard
-        except Exception:
-            return False
-        for key in _MODIFIER_KEYS:
-            try:
-                if keyboard.is_pressed(key):
-                    return True
-            except Exception:
-                continue
-        return False
+        return winput.modifiers_held()
 
     def _wait_modifiers_clear(
         self, elapsed_ms: int, original: str, on_done: Callable[[str], None]
@@ -107,9 +97,7 @@ class SelectionService(QObject):
         # Clear first so we can tell a successful copy apart from stale content.
         self._set_clipboard("")
         try:
-            import keyboard
-
-            keyboard.send("ctrl+c")
+            winput.send_ctrl_c()
         except Exception:
             self._finish(original, "", on_done)
             return

@@ -1,19 +1,30 @@
-"""HotkeyService — global hotkeys via WH_KEYBOARD_LL low-level keyboard hook.
+"""HotkeyService — global hotkeys via the Win32 RegisterHotKey API.
 
-Implemented directly with ctypes (no third-party keyboard library) so it works
-reliably in frozen PyInstaller builds.  A WH_KEYBOARD_LL hook intercepts keys
-before Windows processes them, bypassing system-reserved combo reservations
-(e.g. Windows IME switcher on Ctrl+Shift+Space).
+Why NOT a WH_KEYBOARD_LL low-level hook:
+    A low-level keyboard hook routes EVERY keystroke in the whole OS
+    synchronously through a Python ctypes callback, which must take the GIL
+    for every key.  While any other thread (e.g. the Qt main thread during
+    startup or model loading) holds the GIL, the callback cannot run, and
+    Windows stalls *all* keyboard input system-wide until it does.  The result
+    is "my keyboard is dead while the app is launching".
 
-A single daemon thread runs the required GetMessage pump to keep the hook
-alive.  The hook callback fires on that thread; Qt cross-thread auto-connections
-marshal signal delivery to the main Qt event-loop thread.
+RegisterHotKey has none of that exposure: the kernel matches the combo and
+posts WM_HOTKEY to our message-only thread ONLY when our specific combo is
+pressed.  It installs no system-wide input filter, so it can never block or
+delay any other keystroke.  The matched combo is consumed (not delivered to
+the foreground app), which is exactly what we want for an app hotkey.
+
+A single daemon thread owns every registration (RegisterHotKey is thread-
+affine — the thread that registers is the thread that receives WM_HOTKEY) and
+runs the GetMessage pump.  Registration requests from other threads are handed
+to it via PostThreadMessage and executed on the pump thread.
 """
 
 from __future__ import annotations
 
 import sys
 import threading
+
 from PySide6.QtCore import QObject, Signal
 
 # ---------------------------------------------------------------------------
@@ -26,49 +37,30 @@ if sys.platform == "win32":
 
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _user32.CallNextHookEx.restype = ctypes.c_longlong  # LRESULT = 64-bit on x64
 
-    # Hook type and message constants
-    WH_KEYBOARD_LL = 13
-    WM_KEYDOWN     = 0x0100
-    WM_SYSKEYDOWN  = 0x0104
-    WM_QUIT        = 0x0012
-    HC_ACTION      = 0
+    # ── Win32 constants ──────────────────────────────────────────────────────
+    MOD_ALT      = 0x0001
+    MOD_CONTROL  = 0x0002
+    MOD_SHIFT    = 0x0004
+    MOD_WIN      = 0x0008
+    MOD_NOREPEAT = 0x4000  # don't fire repeatedly while the key is held
 
-    # Virtual key codes for modifier keys
+    WM_HOTKEY = 0x0312
+    WM_APP    = 0x8000
+    _WM_COMMAND_WAKE = WM_APP + 1   # "drain the pending command queue"
+    PM_NOREMOVE = 0x0000
+
     VK_SHIFT   = 0x10
     VK_CONTROL = 0x11
     VK_MENU    = 0x12   # Alt
     VK_LWIN    = 0x5B
-    VK_RWIN    = 0x5C
 
-    class _KBDLLHOOKSTRUCT(ctypes.Structure):
-        _fields_ = [
-            ("vkCode",      ctypes.wintypes.DWORD),
-            ("scanCode",    ctypes.wintypes.DWORD),
-            ("flags",       ctypes.wintypes.DWORD),
-            ("time",        ctypes.wintypes.DWORD),
-            ("dwExtraInfo", ctypes.c_ulong),
-        ]
-
-    # LRESULT is LONG_PTR — 64-bit on 64-bit Windows.  Using c_long (32-bit)
-    # truncates the return value and corrupts the hook chain on x64 builds.
-    _HOOKPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_longlong,
-        ctypes.c_int,
-        ctypes.wintypes.WPARAM,
-        ctypes.wintypes.LPARAM,
-    )
-
-    # Maps modifier token → list of VK codes (any must be pressed)
-    _MOD_VK: dict[str, list[int]] = {
-        "ctrl":    [VK_CONTROL],
-        "control": [VK_CONTROL],
-        "shift":   [VK_SHIFT],
-        "alt":     [VK_MENU],
-        "win":     [VK_LWIN, VK_RWIN],
-        "windows": [VK_LWIN, VK_RWIN],
-        "super":   [VK_LWIN, VK_RWIN],
+    # Modifier token → RegisterHotKey modifier bit.
+    _MOD_BITS: dict[str, int] = {
+        "ctrl": MOD_CONTROL, "control": MOD_CONTROL,
+        "shift": MOD_SHIFT,
+        "alt": MOD_ALT,
+        "win": MOD_WIN, "windows": MOD_WIN, "super": MOD_WIN,
     }
 
     _SPECIAL_VK: dict[str, int] = {
@@ -98,23 +90,36 @@ if sys.platform == "win32":
         "pause": 0x13, "printscreen": 0x2C, "prtsc": 0x2C,
     }
 
-    def _parse_combo(key_combo: str) -> tuple[frozenset[str], int] | None:
-        """'ctrl+shift+space' → (frozenset{'ctrl','shift'}, 0x20) or None.
+    _user32.RegisterHotKey.restype = ctypes.wintypes.BOOL
+    _user32.RegisterHotKey.argtypes = [
+        ctypes.wintypes.HWND, ctypes.c_int,
+        ctypes.wintypes.UINT, ctypes.wintypes.UINT,
+    ]
+    _user32.UnregisterHotKey.restype = ctypes.wintypes.BOOL
+    _user32.UnregisterHotKey.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
+    _user32.PostThreadMessageW.restype = ctypes.wintypes.BOOL
+    _user32.PostThreadMessageW.argtypes = [
+        ctypes.wintypes.DWORD, ctypes.wintypes.UINT,
+        ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM,
+    ]
 
-        Bare keys with no modifiers (e.g. 'esc') return an empty frozenset;
-        the hook fires whenever that VK is pressed regardless of modifier state.
+    def _parse_combo(key_combo: str) -> tuple[int, int] | None:
+        """'ctrl+shift+space' → (MOD_CONTROL|MOD_SHIFT, 0x20), or None if invalid.
+
+        Bare keys with no modifiers (e.g. 'esc') return (0, vk).
         """
-        parts = [p.strip().lower() for p in key_combo.split("+")]
-        mods: set[str] = set()
+        parts = [p.strip().lower() for p in key_combo.split("+") if p.strip()]
+        if not parts:
+            return None
+        mods = 0
         vk: int | None = None
         for part in parts:
-            if part in _MOD_VK:
-                mods.add(part)
+            if part in _MOD_BITS:
+                mods |= _MOD_BITS[part]
             elif part in _SPECIAL_VK:
                 vk = _SPECIAL_VK[part]
             elif len(part) == 1:
-                result = _user32.VkKeyScanW(ord(part))
-                low = result & 0xFF
+                low = _user32.VkKeyScanW(ord(part)) & 0xFF
                 if low == 0xFF:
                     return None
                 vk = low
@@ -122,80 +127,86 @@ if sys.platform == "win32":
                 return None
         if vk is None:
             return None
-        return frozenset(mods), vk
+        return mods, vk
 
-    def _mod_held(mod: str) -> bool:
-        """True if any VK for *mod* is physically pressed right now."""
-        return any(
-            bool(_user32.GetAsyncKeyState(v) & 0x8000)
-            for v in _MOD_VK.get(mod, [])
-        )
-
-    # ---------------------------------------------------------------------------
-    # Global hook state
-    # ---------------------------------------------------------------------------
-
+    # ── Shared pump-thread state ─────────────────────────────────────────────
     _lock = threading.Lock()
+    _id_to_service: dict[int, "HotkeyService"] = {}
+    _next_id = 1
+    _pending: list[dict] = []          # command queue drained on the pump thread
+    _thread_id: int | None = None
+    _ready = threading.Event()
+    _pump_started = False
 
-    # Each entry: (modifier_set, vk_code, HotkeyService)
-    _registered: list[tuple[frozenset[str], int, "HotkeyService"]] = []
-
-    _hook_handle: ctypes.c_void_p | None = None
-    _hook_thread_id: int | None = None
-    _hook_proc_ref: object = None   # prevent GC of ctypes callback
-
-    def _low_level_proc(nCode: int, wParam: int, lParam: int) -> int:
-        # CRITICAL: this function MUST always return CallNextHookEx or the key
-        # is eaten and Windows keyboard processing stalls for every user keypress.
-        try:
-            if nCode == HC_ACTION and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                event = ctypes.cast(lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
-                vk = event.vkCode
-                # Copy the list under lock so we don't hold it during key-state reads.
+    def _drain_commands() -> None:
+        """Run on the pump thread: perform queued (un)register calls."""
+        with _lock:
+            cmds = _pending[:]
+            _pending.clear()
+        for cmd in cmds:
+            if cmd["op"] == "reg":
+                ok = bool(
+                    _user32.RegisterHotKey(None, cmd["id"], cmd["mods"], cmd["vk"])
+                )
+                if ok:
+                    with _lock:
+                        _id_to_service[cmd["id"]] = cmd["svc"]
+                cmd["res"][0] = ok
+            else:  # "unreg"
+                _user32.UnregisterHotKey(None, cmd["id"])
                 with _lock:
-                    snapshot = list(_registered)
-                for mod_set, req_vk, svc in snapshot:
-                    if vk == req_vk and all(_mod_held(m) for m in mod_set):
-                        svc.hotkey_triggered.emit()
-                        return 1  # suppress — only matched hotkeys are eaten
-        except Exception:
-            pass  # never block the hook chain on a Python error
-        return _user32.CallNextHookEx(_hook_handle, nCode, wParam, lParam)
+                    _id_to_service.pop(cmd["id"], None)
+                cmd["res"][0] = True
+            cmd["ev"].set()
 
-    def _hook_thread_main() -> None:
-        global _hook_handle, _hook_thread_id, _hook_proc_ref
-
-        proc = _HOOKPROC(_low_level_proc)
-        _hook_proc_ref = proc   # keep alive for the duration of the thread
-
-        handle = _user32.SetWindowsHookExW(WH_KEYBOARD_LL, proc, None, 0)
-        _hook_handle = handle
-        _hook_thread_id = _kernel32.GetCurrentThreadId()
-
-        # Pump messages — required to keep WH_KEYBOARD_LL alive and receive
-        # hook notifications on this thread.
+    def _pump_main() -> None:
+        global _thread_id
+        _thread_id = _kernel32.GetCurrentThreadId()
+        # Force the thread message queue into existence before anyone posts to it.
         msg = ctypes.wintypes.MSG()
-        while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-            _user32.TranslateMessage(ctypes.byref(msg))
-            _user32.DispatchMessageW(ctypes.byref(msg))
+        _user32.PeekMessageW(ctypes.byref(msg), None, WM_APP, WM_APP, PM_NOREMOVE)
+        _ready.set()
 
-        # Cleanup after WM_QUIT
-        if _hook_handle:
-            _user32.UnhookWindowsHookEx(_hook_handle)
-            _hook_handle = None
+        while True:
+            ret = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if ret in (0, -1):
+                break
+            if msg.message == WM_HOTKEY:
+                with _lock:
+                    svc = _id_to_service.get(int(msg.wParam))
+                if svc is not None:
+                    svc.hotkey_triggered.emit()
+            elif msg.message == _WM_COMMAND_WAKE:
+                _drain_commands()
 
-    _hook_started = False
+    def _ensure_pump() -> None:
+        global _pump_started
+        if _pump_started:
+            return
+        _pump_started = True
+        threading.Thread(
+            target=_pump_main, name="grain-hotkey-pump", daemon=True
+        ).start()
+        _ready.wait(2.0)  # wait until the thread message queue exists
 
-    def _ensure_hook() -> None:
-        global _hook_started
-        if not _hook_started:
-            _hook_started = True
-            t = threading.Thread(
-                target=_hook_thread_main,
-                name="grain-hotkey-hook",
-                daemon=True,
-            )
-            t.start()
+    def _submit(op: str, **kw) -> bool:
+        """Hand a register/unregister command to the pump thread and wait."""
+        _ensure_pump()
+        ev = threading.Event()
+        res = [False]
+        with _lock:
+            _pending.append({"op": op, "ev": ev, "res": res, **kw})
+        if _thread_id is not None:
+            _user32.PostThreadMessageW(_thread_id, _WM_COMMAND_WAKE, 0, 0)
+        ev.wait(2.0)
+        return res[0]
+
+    def _alloc_id() -> int:
+        global _next_id
+        with _lock:
+            hid = _next_id
+            _next_id += 1
+        return hid
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +220,7 @@ class HotkeyService(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._combo: tuple[frozenset[str], int] | None = None
+        self._id: int | None = None
 
     def register(self, key_combo: str) -> bool:
         """Register *key_combo* (e.g. 'ctrl+shift+space').  Returns True on success."""
@@ -222,23 +233,17 @@ class HotkeyService(QObject):
         if parsed is None:
             return False
 
-        _ensure_hook()
-
-        with _lock:
-            _registered.append((parsed[0], parsed[1], self))
-
-        self._combo = parsed
-        return True
+        mods, vk = parsed
+        hid = _alloc_id()
+        ok = _submit("reg", id=hid, mods=mods | MOD_NOREPEAT, vk=vk, svc=self)
+        if ok:
+            self._id = hid
+        return ok
 
     def unregister(self) -> None:
         """Remove this service's hotkey.  No-op if none registered."""
-        if self._combo is None:
+        if self._id is None:
             return
         if sys.platform == "win32":
-            mod_set, vk = self._combo
-            with _lock:
-                _registered[:] = [
-                    e for e in _registered
-                    if not (e[0] == mod_set and e[1] == vk and e[2] is self)
-                ]
-        self._combo = None
+            _submit("unreg", id=self._id)
+        self._id = None

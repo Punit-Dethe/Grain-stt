@@ -21,12 +21,12 @@ from PySide6.QtCore import QObject, QTimer
 from PySide6.QtGui import QClipboard
 from PySide6.QtWidgets import QApplication
 
+from open_voice_router.services import winput
+
 # How long to wait (total) for the user to release modifier keys before we
 # give up waiting and paste anyway.
 _MODIFIER_RELEASE_TIMEOUT_MS = 1500
 _POLL_INTERVAL_MS = 40
-# Modifier keys that, if held, would corrupt a simulated Ctrl+V.
-_MODIFIER_KEYS = ("ctrl", "shift", "alt", "windows", "left windows", "right windows")
 
 
 class ClipboardService(QObject):
@@ -57,18 +57,7 @@ class ClipboardService(QObject):
 
     def _modifiers_held(self) -> bool:
         """Return True if any paste-corrupting modifier key is physically held."""
-        try:
-            import keyboard
-        except Exception:
-            return False  # can't check → assume clear
-        for key in _MODIFIER_KEYS:
-            try:
-                if keyboard.is_pressed(key):
-                    return True
-            except Exception:
-                # Unknown key name on this platform/layout — ignore it.
-                continue
-        return False
+        return winput.modifiers_held()
 
     def _paste_when_clear(self, elapsed_ms: int) -> None:
         """Wait for modifier keys to release (up to a timeout), then send Ctrl+V."""
@@ -84,13 +73,7 @@ class ClipboardService(QObject):
     def _send_paste(self) -> None:
         """Fire a clean Ctrl+V. Clipboard already holds the text as a fallback."""
         try:
-            import keyboard
-        except Exception:
-            return  # keyboard lib unavailable — user can paste manually
-        try:
-            # Explicitly release modifiers we may have observed, to be safe,
-            # then send a clean Ctrl+V.
-            keyboard.send("ctrl+v")
+            winput.send_ctrl_v()
         except Exception:
             # Swallow — the text is already on the clipboard for manual paste.
             pass
