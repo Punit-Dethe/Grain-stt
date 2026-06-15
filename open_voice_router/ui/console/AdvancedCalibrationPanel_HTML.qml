@@ -10,16 +10,52 @@ Item {
 
     signal closeRequested()
 
-    // ── DESIGN TOKENS ──────────────────────────────────────────────────────────
-    readonly property color bgMain:       "#ECE5DA"   // travertine
-    readonly property color bgSidebar:    "#DDD5C8"   // sidebar matches original
-    readonly property color surfaceCard:  "#DDD5C8"   // card surface
-    readonly property color surfaceInput: "#DDD5C8"   // input fields
-    readonly property color charcoal:     "#141312"
-    readonly property color textPrimary:  "#141312"
-    readonly property color textMuted:    Qt.rgba(0.078, 0.075, 0.071, 0.5)
-    readonly property color textGhost:    Qt.rgba(0.078, 0.075, 0.071, 0.35)
-    readonly property color divider:      Qt.rgba(0, 0, 0, 0.07)
+    // ── THEME (light / dark) ────────────────────────────────────────────────────
+    // Mirrors the Quick Panel approach (ConsoleTheme): a single animated driver
+    // `t` (0 = light, 1 = dark) interpolates every neutral colour, so flipping
+    // isDark crossfades the whole panel in sync — no per-element Behaviors and no
+    // duplicate "dark" components. The Advanced Panel carries its OWN persisted
+    // flag (ui_dark_mode_advanced), independent of the Quick Panel, so the two
+    // can be mixed (e.g. dark Quick Panel + light Advanced Panel).
+    property bool isDark: (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                          ? consoleViewModel.ui_dark_mode_advanced : false
+    property real t: isDark ? 1.0 : 0.0
+    Behavior on t { NumberAnimation { duration: 420; easing.type: Easing.InOutCubic } }
+
+    // Linear blend between two colours (hex strings or color objects) by `t`.
+    function mix(a, b) {
+        var c1 = (typeof a === "string") ? Qt.color(a) : a
+        var c2 = (typeof b === "string") ? Qt.color(b) : b
+        return Qt.rgba(c1.r + (c2.r - c1.r) * t,
+                       c1.g + (c2.g - c1.g) * t,
+                       c1.b + (c2.b - c1.b) * t,
+                       c1.a + (c2.a - c1.a) * t)
+    }
+    // Near-black ink (text / borders on light surfaces) → warm off-white in dark.
+    function ink(a)    { return mix(Qt.rgba(0.078, 0.075, 0.071, a), Qt.rgba(0.925, 0.898, 0.855, a)) }
+    // Inverse ink — labels sitting ON the charcoal accent surface (which flips to
+    // cream in dark): warm off-white in light → near-black in dark.
+    function inkInv(a) { return mix(Qt.rgba(0.925, 0.898, 0.855, a), Qt.rgba(0.078, 0.075, 0.071, a)) }
+    // Neutral black tint on a light surface → white tint on a dark surface.
+    function fill(a)   { return mix(Qt.rgba(0, 0, 0, a), Qt.rgba(1, 1, 1, a)) }
+
+    // ── DESIGN TOKENS (themed) ───────────────────────────────────────────────────
+    readonly property color bgMain:       mix("#ECE5DA", "#181716")  // travertine → ink black
+    readonly property color bgSidebar:    mix("#DDD5C8", "#121110")  // sidebar recess
+    readonly property color surfaceCard:  mix("#DDD5C8", "#211e1b")  // card lifts above bg in dark
+    readonly property color surfaceInput: mix("#DDD5C8", "#211e1b")  // input fields
+    // charcoal is overloaded: dark TEXT on light fields AND dark filled SURFACES.
+    // Flipping it to cream makes text read as cream-on-dark and filled buttons
+    // become cream-with-dark-labels (labels use textLight = inkInv) — both correct.
+    readonly property color charcoal:     mix("#141312", "#ECE5DA")
+    readonly property color charcoalHover: mix("#2a2826", "#cfc7ba")  // hover shade for charcoal-filled buttons
+    readonly property color textPrimary:  ink(1.0)
+    readonly property color textMuted:    ink(0.5)
+    readonly property color textGhost:    ink(0.35)
+    readonly property color textLight:    inkInv(1.0)  // label colour on charcoal surfaces
+    readonly property color divider:      fill(0.07)
+    // Subtle input-field lift (cream wash in light, faint white lift in dark).
+    readonly property color inputFill:    mix(Qt.rgba(0.925, 0.898, 0.855, 0.15), Qt.rgba(1, 1, 1, 0.05))
     readonly property color orange:       "#FF5D1E"
     readonly property color green:        "#10B981"
     readonly property color purple:       "#8B5CF6"
@@ -79,7 +115,7 @@ Item {
                             font.pixelSize: 11
                             font.bold: false
                             font.letterSpacing: 2
-                            color: "#ECE5DA"
+                            color: textLight
                         }
                     }
 
@@ -131,7 +167,7 @@ Item {
 
                             color: active
                                    ? Qt.rgba(orange.r, orange.g, orange.b, 0.12)
-                                   : navHover.hovered ? Qt.rgba(0,0,0,0.03) : "transparent"
+                                   : navHover.hovered ? fill(0.03) : "transparent"
 
                             border.color: active ? Qt.rgba(orange.r, orange.g, orange.b, 0.4) : "transparent"
                             border.width: active ? 1 : 0
@@ -271,10 +307,53 @@ Item {
 
                     Item { Layout.fillWidth: true }
 
+                    // ── Light / Dark toggle (mirrors the Quick Panel switcher) ──
+                    Rectangle {
+                        width: 90; height: 26; radius: 8
+                        color: root.isDark ? "#272422" : "#E0D9CF"
+                        Behavior on color { ColorAnimation { duration: 380; easing.type: Easing.InOutCubic } }
+
+                        Rectangle {
+                            width: 38; height: 20; radius: 8; y: 3
+                            x: root.isDark ? 49 : 3
+                            color: root.isDark ? "#4A4540" : "#8C857D"
+                            Behavior on x     { NumberAnimation { duration: 320; easing.type: Easing.InOutCubic } }
+                            Behavior on color { ColorAnimation  { duration: 380; easing.type: Easing.InOutCubic } }
+                        }
+
+                        Text {
+                            anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                            text: "LIGHT"
+                            font.family: "JetBrains Mono"; font.pixelSize: 8; font.bold: true
+                            color: root.isDark ? Qt.rgba(0.925, 0.898, 0.855, 0.32) : "#DDD5C8"
+                            Behavior on color { ColorAnimation { duration: 380 } }
+                        }
+
+                        Text {
+                            anchors { right: parent.right; rightMargin: 10; verticalCenter: parent.verticalCenter }
+                            text: "DARK"
+                            font.family: "JetBrains Mono"; font.pixelSize: 8; font.bold: true
+                            color: root.isDark ? "#1a1816" : Qt.rgba(0.078, 0.071, 0.063, 0.38)
+                            Behavior on color { ColorAnimation { duration: 380 } }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                var newDark = !root.isDark
+                                if (typeof consoleViewModel !== "undefined" && consoleViewModel)
+                                    consoleViewModel.save_ui_dark_mode_advanced(newDark)
+                                else root.isDark = newDark
+                            }
+                        }
+                    }
+
+                    Item { width: 12 }
+
                     // Slot badge (right-aligned)
                     Rectangle {
                         width: 96; height: 26; radius: 6
-                        color: Qt.rgba(0, 0, 0, 0.05)
+                        color: fill(0.05)
                         border.color: divider; border.width: 1
 
                         RowLayout {
@@ -526,7 +605,7 @@ Item {
             anchors.fill: parent
             radius: 6
             color: surfaceInput
-            border.color: skb.listening ? orange : (skbHov.hovered ? Qt.rgba(0,0,0,0.12) : divider)
+            border.color: skb.listening ? orange : (skbHov.hovered ? fill(0.12) : divider)
             border.width: 1
             Behavior on border.color { ColorAnimation { duration: 150 } }
 
@@ -640,8 +719,8 @@ Item {
                                 height: 18
                                 width: _csGrainPill.implicitWidth + 12
                                 radius: 9
-                                color: Qt.rgba(0.078, 0.075, 0.071, 0.06)
-                                border.color: Qt.rgba(0.078, 0.075, 0.071, 0.15)
+                                color: ink(0.06)
+                                border.color: ink(0.15)
                                 border.width: 1
                                 Text {
                                     id: _csGrainPill
@@ -649,7 +728,7 @@ Item {
                                     text: "select text → instruct"
                                     font.family: "JetBrains Mono"
                                     font.pixelSize: 9
-                                    color: Qt.rgba(0.078, 0.075, 0.071, 0.4)
+                                    color: ink(0.4)
                                 }
                             }
                             ShortcutKeyBox {
@@ -728,7 +807,7 @@ Item {
                                     }
 
                                     background: Rectangle {
-                                        color: micDel.highlighted ? Qt.rgba(0, 0, 0, 0.06) : "transparent"
+                                        color: micDel.highlighted ? fill(0.06) : "transparent"
                                     }
                                 }
 
@@ -742,7 +821,7 @@ Item {
                                     background: Rectangle {
                                         radius: 8
                                         color: bgMain
-                                        border.color: Qt.rgba(0, 0, 0, 0.10)
+                                        border.color: fill(0.10)
                                         border.width: 1
                                     }
 
@@ -771,8 +850,8 @@ Item {
                                             }
                                             background: Rectangle {
                                                 color: parent.highlighted
-                                                       ? Qt.rgba(0, 0, 0, 0.06)
-                                                       : (parent.hovered ? Qt.rgba(0, 0, 0, 0.03) : "transparent")
+                                                       ? fill(0.06)
+                                                       : (parent.hovered ? fill(0.03) : "transparent")
                                             }
                                             MouseArea {
                                                 anchors.fill: parent
@@ -799,10 +878,10 @@ Item {
                                 radius: 9
                                 color: consoleViewModel.process_audio
                                        ? Qt.rgba(0.063, 0.725, 0.506, 0.10)
-                                       : Qt.rgba(0.078, 0.075, 0.071, 0.06)
+                                       : ink(0.06)
                                 border.color: consoleViewModel.process_audio
                                        ? Qt.rgba(0.063, 0.725, 0.506, 0.4)
-                                       : Qt.rgba(0.078, 0.075, 0.071, 0.15)
+                                       : ink(0.15)
                                 border.width: 1
 
                                 Text {
@@ -813,7 +892,7 @@ Item {
                                     font.pixelSize: 9
                                     color: consoleViewModel.process_audio
                                            ? "#10B981"
-                                           : Qt.rgba(0.078, 0.075, 0.071, 0.4)
+                                           : ink(0.4)
                                 }
                             }
 
@@ -1042,8 +1121,8 @@ Item {
                                             if (s === "running")   return green
                                             if (s === "error")     return "#EF4444"
                                             if (s === "installing" || s === "starting") return orange
-                                            if (s === "stopped")   return Qt.rgba(0.078, 0.075, 0.071, 0.35)
-                                            return Qt.rgba(0.078, 0.075, 0.071, 0.18)
+                                            if (s === "stopped")   return ink(0.35)
+                                            return ink(0.18)
                                         }
                                         Behavior on color { ColorAnimation { duration: 200 } }
                                     }
@@ -1080,7 +1159,7 @@ Item {
                                     onPaint: {
                                         var ctx = getContext("2d")
                                         ctx.clearRect(0, 0, width, height)
-                                        ctx.strokeStyle = deleteTopHover.hovered ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.4)
+                                        ctx.strokeStyle = deleteTopHover.hovered ? "#CC3333" : ink(0.4)
                                         ctx.lineWidth = 1.5; ctx.lineCap = "round"
                                         ctx.strokeRect(2, 4, 10, 9)
                                         ctx.beginPath(); ctx.moveTo(1, 4); ctx.lineTo(13, 4); ctx.stroke()
@@ -1111,7 +1190,7 @@ Item {
                                 Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: parent.width; height: 6; radius: 3
-                                    color: Qt.rgba(0, 0, 0, 0.1); clip: true
+                                    color: fill(0.1); clip: true
 
                                     Rectangle {
                                         id: progressPill
@@ -1141,7 +1220,7 @@ Item {
                                 color: {
                                     var s = offlineWeightsCard.liveStatus
                                     if (s === "running")  return charcoal
-                                    if (s === "stopped")  return Qt.rgba(0.078, 0.075, 0.071, 0.15)
+                                    if (s === "stopped")  return ink(0.15)
                                     if (s === "error")    return "#C0392F"
                                     return orange   // not_installed, installing, starting
                                 }
@@ -1156,7 +1235,7 @@ Item {
                                     color: {
                                         var s = offlineWeightsCard.liveStatus
                                         if (s === "running") return textLight
-                                        if (s === "stopped") return Qt.rgba(0.078, 0.075, 0.071, 0.5)
+                                        if (s === "stopped") return ink(0.5)
                                         return "white"
                                     }
                                     text: {
@@ -1254,9 +1333,9 @@ Item {
                                 Rectangle {
                                     anchors.fill: parent
                                     radius: 8
-                                    color: isActive ? Qt.rgba(0,0,0,0.05)
-                                         : (modelHover.hovered ? Qt.rgba(0,0,0,0.04) : "transparent")
-                                    border.color: isActive ? Qt.rgba(0,0,0,0.10) : "transparent"
+                                    color: isActive ? fill(0.05)
+                                         : (modelHover.hovered ? fill(0.04) : "transparent")
+                                    border.color: isActive ? fill(0.10) : "transparent"
                                     border.width: isActive ? 1 : 0
                                     Behavior on color { ColorAnimation { duration: 150 } }
 
@@ -1296,7 +1375,7 @@ Item {
                                             height: 22
                                             radius: 11
                                             color: isInstalled ? Qt.rgba(0.063, 0.725, 0.506, 0.14)
-                                                               : Qt.rgba(0.078, 0.075, 0.071, 0.06)
+                                                               : ink(0.06)
                                             border.width: 1
                                             border.color: isInstalled ? Qt.rgba(0.063, 0.725, 0.506, 0.45) : divider
 
@@ -1332,7 +1411,7 @@ Item {
                                                 onPaint: {
                                                     var ctx = getContext("2d")
                                                     ctx.clearRect(0, 0, width, height)
-                                                    ctx.strokeStyle = delRowHover.hovered ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.4)
+                                                    ctx.strokeStyle = delRowHover.hovered ? "#CC3333" : ink(0.4)
                                                     ctx.lineWidth = 1.5; ctx.lineCap = "round"
                                                     ctx.strokeRect(2, 4, 10, 9)
                                                     ctx.beginPath(); ctx.moveTo(1, 4); ctx.lineTo(13, 4); ctx.stroke()
@@ -1362,7 +1441,7 @@ Item {
                                             color: {
                                                 if (isActive) return charcoal
                                                 if (selectBtnHover.hovered) return Qt.rgba(1, 0.365, 0.118, 0.85)
-                                                return Qt.rgba(0.078, 0.075, 0.071, 0.15)
+                                                return ink(0.15)
                                             }
                                             border.color: isActive ? "transparent" : divider
                                             border.width: isActive ? 0 : 1
@@ -1388,7 +1467,7 @@ Item {
                                                     font.letterSpacing: 0.5
                                                     color: isActive ? textLight
                                                          : (selectBtnHover.hovered ? "white"
-                                                            : Qt.rgba(0.078, 0.075, 0.071, 0.5))
+                                                            : ink(0.5))
                                                 }
                                             }
 
@@ -1425,7 +1504,7 @@ Item {
                         }
                         height: 36
                         radius: 12
-                        color: Qt.rgba(0,0,0,0.06)
+                        color: fill(0.06)
 
                         RowLayout {
                             anchors.centerIn: parent
@@ -1681,7 +1760,7 @@ Item {
                                         text: "+"
                                         font.pixelSize: 16
                                         font.bold: true
-                                        color: "white"
+                                        color: textLight
                                         visible: !addProviderCard.expanded
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
@@ -1691,7 +1770,7 @@ Item {
                                         font.family: "JetBrains Mono"
                                         font.pixelSize: 10
                                         font.bold: true
-                                        color: "white"
+                                        color: textLight
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
                                 }
@@ -1765,8 +1844,8 @@ Item {
 
                                 background: Rectangle {
                                     radius: 6
-                                    color: Qt.rgba(0.925, 0.898, 0.855, 0.15)
-                                    border.color: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                    color: inputFill
+                                    border.color: ink(0.25)
                                     border.width: 1.5
                                 }
 
@@ -1814,8 +1893,8 @@ Item {
 
                                 background: Rectangle {
                                     radius: 6
-                                    color: Qt.rgba(0.925, 0.898, 0.855, 0.15)
-                                    border.color: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                    color: inputFill
+                                    border.color: ink(0.25)
                                     border.width: 1.5
                                 }
                             }
@@ -1842,8 +1921,8 @@ Item {
 
                             background: Rectangle {
                                 radius: 6
-                                color: Qt.rgba(0.925, 0.898, 0.855, 0.15)
-                                border.color: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                color: inputFill
+                                border.color: ink(0.25)
                                 border.width: 1.5
                             }
                         }
@@ -1864,8 +1943,8 @@ Item {
 
                             background: Rectangle {
                                 radius: 6
-                                color: Qt.rgba(0.925, 0.898, 0.855, 0.15)
-                                border.color: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                color: inputFill
+                                border.color: ink(0.25)
                                 border.width: 1.5
                             }
                         }
@@ -1967,8 +2046,8 @@ Item {
                                         RowLayout {
                                             spacing: 8
                                             Text { text: "Parakeet 0.6"; font.family: "JetBrains Mono"; font.pixelSize: 11; font.bold: true; color: textPrimary }
-                                            Rectangle { width: 1; height: 12; color: Qt.rgba(0.078,0.075,0.071,0.18); Layout.alignment: Qt.AlignVCenter }
-                                            Text { text: "LOCAL"; font.family: "JetBrains Mono"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1.2; color: Qt.rgba(0.078,0.075,0.071,0.35); Layout.alignment: Qt.AlignVCenter }
+                                            Rectangle { width: 1; height: 12; color: ink(0.18); Layout.alignment: Qt.AlignVCenter }
+                                            Text { text: "LOCAL"; font.family: "JetBrains Mono"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1.2; color: ink(0.35); Layout.alignment: Qt.AlignVCenter }
                                         }
                                         Text { text: "parakeet-ctc-0.6b-v2"; font.family: "JetBrains Mono"; font.pixelSize: 9; color: textGhost }
                                     }
@@ -1978,13 +2057,13 @@ Item {
                                         width: 6; height: 6; radius: 3; Layout.alignment: Qt.AlignVCenter
                                         color: {
                                             var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
-                                            if (!vm) return Qt.rgba(0.078,0.075,0.071,0.18)
+                                            if (!vm) return ink(0.18)
                                             var s = vm.local_stt_status
                                             if (s === "running")   return "#10B981"
                                             if (s === "error")     return "#EF4444"
                                             if (s === "installing" || s === "starting") return "#FF5D1E"
-                                            if (s === "stopped")   return Qt.rgba(0.078,0.075,0.071,0.35)
-                                            return Qt.rgba(0.078,0.075,0.071,0.18)
+                                            if (s === "stopped")   return ink(0.35)
+                                            return ink(0.18)
                                         }
                                     }
                                     MechanicalToggle {
@@ -2026,7 +2105,7 @@ Item {
                                     Layout.fillWidth: true
                                     height: 52
                                     radius: 8
-                                    color: sttRowHover.hovered ? Qt.rgba(0,0,0,0.04) : "transparent"
+                                    color: sttRowHover.hovered ? fill(0.04) : "transparent"
                                     Behavior on color { ColorAnimation { duration: 150 } }
 
                                     HoverHandler { id: sttRowHover }
@@ -2065,7 +2144,7 @@ Item {
                                         // Add-Provider form pre-filled for this provider.
                                         Rectangle {
                                             width: 28; height: 28; radius: 6
-                                            color: sttEditHover.hovered ? Qt.rgba(0.078, 0.075, 0.071, 0.10) : "transparent"
+                                            color: sttEditHover.hovered ? ink(0.10) : "transparent"
                                             visible: sttRowHover.hovered === true || sttEditHover.hovered === true
                                             Behavior on color { ColorAnimation { duration: 120 } }
 
@@ -2075,7 +2154,7 @@ Item {
                                                 onPaint: {
                                                     var ctx = getContext("2d")
                                                     ctx.clearRect(0, 0, width, height)
-                                                    ctx.strokeStyle = sttEditHover.hovered ? orange : Qt.rgba(0.078, 0.075, 0.071, 0.45)
+                                                    ctx.strokeStyle = sttEditHover.hovered ? orange : ink(0.45)
                                                     ctx.lineWidth = 1.5
                                                     ctx.lineCap = "round"
                                                     // pencil body
@@ -2110,7 +2189,7 @@ Item {
                                                 onPaint: {
                                                     var ctx = getContext("2d")
                                                     ctx.clearRect(0, 0, width, height)
-                                                    ctx.strokeStyle = sttTrashHover.hovered ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.45)
+                                                    ctx.strokeStyle = sttTrashHover.hovered ? "#CC3333" : ink(0.45)
                                                     ctx.lineWidth = 1.5
                                                     ctx.lineCap = "round"
                                                     ctx.strokeRect(2, 4, 10, 9)
@@ -2289,7 +2368,7 @@ Item {
                                         text: "+"
                                         font.pixelSize: 16
                                         font.bold: true
-                                        color: "white"
+                                        color: textLight
                                         visible: !addLlmProviderCard.expanded
                                     }
 
@@ -2298,7 +2377,7 @@ Item {
                                         font.family: "JetBrains Mono"
                                         font.pixelSize: 10
                                         font.bold: true
-                                        color: "white"
+                                        color: textLight
                                     }
                                 }
 
@@ -2372,8 +2451,8 @@ Item {
 
                                 background: Rectangle {
                                     radius: 6
-                                    color: Qt.rgba(0.925, 0.898, 0.855, 0.15)
-                                    border.color: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                    color: inputFill
+                                    border.color: ink(0.25)
                                     border.width: 1.5
                                 }
 
@@ -2420,8 +2499,8 @@ Item {
 
                                 background: Rectangle {
                                     radius: 6
-                                    color: Qt.rgba(0.925, 0.898, 0.855, 0.15)
-                                    border.color: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                    color: inputFill
+                                    border.color: ink(0.25)
                                     border.width: 1.5
                                 }
                             }
@@ -2448,8 +2527,8 @@ Item {
 
                             background: Rectangle {
                                 radius: 6
-                                color: Qt.rgba(0.925, 0.898, 0.855, 0.15)
-                                border.color: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                color: inputFill
+                                border.color: ink(0.25)
                                 border.width: 1.5
                             }
                         }
@@ -2469,8 +2548,8 @@ Item {
 
                             background: Rectangle {
                                 radius: 6
-                                color: Qt.rgba(0.925, 0.898, 0.855, 0.15)
-                                border.color: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                color: inputFill
+                                border.color: ink(0.25)
                                 border.width: 1.5
                             }
                         }
@@ -2575,7 +2654,7 @@ Item {
                                     Layout.fillWidth: true
                                     height: 52
                                     radius: 8
-                                    color: llmRowHover.hovered ? Qt.rgba(0,0,0,0.04) : "transparent"
+                                    color: llmRowHover.hovered ? fill(0.04) : "transparent"
                                     Behavior on color { ColorAnimation { duration: 150 } }
 
                                     HoverHandler { id: llmRowHover }
@@ -2598,14 +2677,14 @@ Item {
                                                 }
                                                 // CUSTOM tag — visible for user-added custom endpoints
                                                 Rectangle {
-                                                    width: 1; height: 12; color: Qt.rgba(0.078,0.075,0.071,0.18)
+                                                    width: 1; height: 12; color: ink(0.18)
                                                     Layout.alignment: Qt.AlignVCenter
                                                     visible: modelData.kind === "custom"
                                                 }
                                                 Text {
                                                     text: "CUSTOM"
                                                     font.family: "JetBrains Mono"; font.pixelSize: 9; font.bold: true
-                                                    font.letterSpacing: 1.2; color: Qt.rgba(0.078,0.075,0.071,0.35)
+                                                    font.letterSpacing: 1.2; color: ink(0.35)
                                                     Layout.alignment: Qt.AlignVCenter
                                                     visible: modelData.kind === "custom"
                                                 }
@@ -2625,7 +2704,7 @@ Item {
                                         // Edit (pencil) — opens the Add-Provider form pre-filled.
                                         Rectangle {
                                             width: 28; height: 28; radius: 6
-                                            color: llmEditHover.hovered ? Qt.rgba(0.078, 0.075, 0.071, 0.10) : "transparent"
+                                            color: llmEditHover.hovered ? ink(0.10) : "transparent"
                                             visible: llmRowHover.hovered === true || llmEditHover.hovered === true
                                             Behavior on color { ColorAnimation { duration: 120 } }
 
@@ -2635,7 +2714,7 @@ Item {
                                                 onPaint: {
                                                     var ctx = getContext("2d")
                                                     ctx.clearRect(0, 0, width, height)
-                                                    ctx.strokeStyle = llmEditHover.hovered ? orange : Qt.rgba(0.078, 0.075, 0.071, 0.45)
+                                                    ctx.strokeStyle = llmEditHover.hovered ? orange : ink(0.45)
                                                     ctx.lineWidth = 1.5
                                                     ctx.lineCap = "round"
                                                     ctx.beginPath(); ctx.moveTo(9, 2); ctx.lineTo(12, 5); ctx.lineTo(5, 12); ctx.lineTo(2, 12); ctx.lineTo(2, 9); ctx.closePath(); ctx.stroke()
@@ -2668,7 +2747,7 @@ Item {
                                                 onPaint: {
                                                     var ctx = getContext("2d")
                                                     ctx.clearRect(0, 0, width, height)
-                                                    ctx.strokeStyle = llmTrashHover.hovered ? "#CC3333" : Qt.rgba(0.078, 0.075, 0.071, 0.45)
+                                                    ctx.strokeStyle = llmTrashHover.hovered ? "#CC3333" : ink(0.45)
                                                     ctx.lineWidth = 1.5
                                                     ctx.lineCap = "round"
                                                     ctx.strokeRect(2, 4, 10, 9)
@@ -2948,7 +3027,7 @@ Item {
 
                                                 color: isSelected
                                                        ? charcoal
-                                                       : (tabHov.hovered ? Qt.rgba(0,0,0,0.10) : Qt.rgba(0,0,0,0.05))
+                                                       : (tabHov.hovered ? fill(0.10) : fill(0.05))
                                                 Behavior on color { ColorAnimation { duration: 120 } }
 
                                                 HoverHandler { id: tabHov }
@@ -2971,7 +3050,7 @@ Item {
                                                         font.pixelSize: 10
                                                         font.bold: promptTab.isSelected
                                                         color: promptTab.isSelected
-                                                               ? "#ECE5DA"
+                                                               ? textLight
                                                                : (tabHov.hovered ? charcoal : textMuted)
                                                         anchors.verticalCenter: parent.verticalCenter
                                                         Behavior on color { ColorAnimation { duration: 120 } }
@@ -2981,7 +3060,7 @@ Item {
                                                         text: "×"
                                                         font.pixelSize: 14
                                                         anchors.verticalCenter: parent.verticalCenter
-                                                        color: promptTab.isSelected ? Qt.rgba(1,1,1,0.45) : textGhost
+                                                        color: promptTab.isSelected ? inkInv(0.45) : textGhost
                                                         visible: tabHov.hovered === true &&
                                                                  promptsBuilderCard.promptCount > 1
 
@@ -3045,7 +3124,7 @@ Item {
                             // + add new prompt tab
                             Rectangle {
                                 height: 32; width: 32; radius: 8
-                                color: addTabHov.hovered ? Qt.rgba(0,0,0,0.10) : Qt.rgba(0,0,0,0.05)
+                                color: addTabHov.hovered ? fill(0.10) : fill(0.05)
                                 Behavior on color { ColorAnimation { duration: 120 } }
                                 HoverHandler { id: addTabHov }
                                 Text {
@@ -3080,7 +3159,7 @@ Item {
                                 color: charcoal
                                 leftPadding: 12; rightPadding: 12
                                 placeholderText: "Prompt name…"
-                                placeholderTextColor: Qt.rgba(0.078, 0.075, 0.071, 0.3)
+                                placeholderTextColor: ink(0.3)
 
                                 background: Rectangle {
                                     radius: 7
@@ -3088,8 +3167,8 @@ Item {
                                     border.color: promptNameField.activeFocus
                                                   ? orange
                                                   : (nameHov.hovered
-                                                     ? Qt.rgba(0,0,0,0.15)
-                                                     : Qt.rgba(0,0,0,0.08))
+                                                     ? fill(0.15)
+                                                     : fill(0.08))
                                     border.width: 1.5
                                     Behavior on border.color { ColorAnimation { duration: 120 } }
                                     HoverHandler { id: nameHov }
@@ -3106,7 +3185,7 @@ Item {
                                 color: surfaceInput
                                 border.color: promptContentArea.activeFocus
                                               ? orange
-                                              : Qt.rgba(0, 0, 0, 0.08)
+                                              : fill(0.08)
                                 border.width: 1.5
                                 clip: true
                                 Behavior on border.color { ColorAnimation { duration: 120 } }
@@ -3122,7 +3201,7 @@ Item {
                                         leftPadding: 14; rightPadding: 14
                                         topPadding: 12; bottomPadding: 12
                                         placeholderText: "Write your directive prompt here…"
-                                        placeholderTextColor: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                        placeholderTextColor: ink(0.25)
                                         background: Rectangle { color: "transparent" }
                                         onTextChanged: autoSaveTimer.restart()
                                     }
@@ -3140,8 +3219,8 @@ Item {
                                     return d ? d.is_active : false
                                 }
 
-                                color: Qt.rgba(0, 0, 0, 0.04)
-                                border.color: Qt.rgba(0, 0, 0, 0.07)
+                                color: fill(0.04)
+                                border.color: fill(0.07)
                                 border.width: 1
 
                                 RowLayout {
@@ -3170,7 +3249,7 @@ Item {
                                         height: 30; width: 88
                                         radius: 6
                                         visible: !parent.parent.isActive
-                                        color: activateHov.hovered ? "#2a2826" : charcoal
+                                        color: activateHov.hovered ? charcoalHover : charcoal
                                         Behavior on color { ColorAnimation { duration: 100 } }
                                         HoverHandler { id: activateHov }
 
@@ -3196,7 +3275,7 @@ Item {
                                         height: 30; width: 88
                                         radius: 6
                                         visible: promptsBuilderCard.promptCount > 1
-                                        color: delActionHov.hovered ? "#2a2826" : charcoal
+                                        color: delActionHov.hovered ? charcoalHover : charcoal
                                         Behavior on color { ColorAnimation { duration: 100 } }
                                         HoverHandler { id: delActionHov }
 
@@ -3205,7 +3284,7 @@ Item {
                                             anchors.centerIn: parent
                                             text: "DELETE"
                                             font.family: "JetBrains Mono"; font.pixelSize: 9; font.bold: true
-                                            color: "white"
+                                            color: textLight
                                         }
 
                                         MouseArea {
@@ -3275,7 +3354,7 @@ Item {
                                     Layout.preferredWidth: 240
                                     Layout.preferredHeight: 42
                                     placeholderText: "add a word"
-                                    placeholderTextColor: Qt.rgba(0.078, 0.075, 0.071, 0.25)
+                                    placeholderTextColor: ink(0.25)
                                     font.family: "JetBrains Mono"
                                     font.pixelSize: 11
                                     color: charcoal
@@ -3286,7 +3365,7 @@ Item {
                                         color: surfaceInput
                                         border.color: vocabInputField.activeFocus
                                                       ? orange
-                                                      : (vocabInputField.hovered ? Qt.rgba(0,0,0,0.20) : Qt.rgba(0,0,0,0.14))
+                                                      : (vocabInputField.hovered ? fill(0.20) : fill(0.14))
                                         border.width: 1.5
                                         Behavior on border.color { ColorAnimation { duration: 150 } }
                                     }
@@ -3304,7 +3383,7 @@ Item {
                                     width: 64
                                     height: 42
                                     radius: 6
-                                    color: addVocabHover.hovered ? Qt.rgba(0.078, 0.075, 0.071, 0.9) : charcoal
+                                    color: addVocabHover.hovered ? ink(0.9) : charcoal
                                     Behavior on color { ColorAnimation { duration: 150 } }
 
                                     Text {
@@ -3346,7 +3425,7 @@ Item {
                                     width: badgeTxt.width + 28
                                     height: 26
                                     radius: 5
-                                    color: Qt.rgba(0,0,0,0.07)
+                                    color: fill(0.07)
 
                                     RowLayout {
                                         anchors.centerIn: parent

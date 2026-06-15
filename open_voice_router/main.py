@@ -53,6 +53,7 @@ _PILL_QML = _UI_DIR / "pill" / "PillWindow.qml"
 _CONSOLE_QML = _UI_DIR / "console" / "ConsoleWindow.qml"
 _ASSIST_PALETTE_QML = _UI_DIR / "assist" / "AssistPalette.qml"
 _ASSIST_PANEL_QML = _UI_DIR / "assist" / "AssistPanel.qml"
+_ONBOARDING_QML = _UI_DIR / "onboarding" / "Onboarding.qml"
 
 
 def _load_bundled_fonts() -> None:
@@ -163,6 +164,11 @@ def main() -> None:
     # 1. Load settings FIRST (Requirement 11.2)
     # ------------------------------------------------------------------
     settings_store = SettingsStore()
+    # Fresh-install detection MUST happen before load() (which materialises
+    # defaults): the settings file is absent only on a true first run, which is
+    # the single trigger for the one-time onboarding wizard. Existing users —
+    # whose file predates the onboarding_complete flag — are never re-onboarded.
+    _config_existed = settings_store._path.exists()
     _config_was_corrupt = False
 
     try:
@@ -438,6 +444,91 @@ def main() -> None:
             _console_window.requestActivate()
 
     # ------------------------------------------------------------------
+    # 7c. First-run onboarding — summon-once, destroy-completely.
+    #
+    # The wizard runs on its OWN throwaway QML engine (same isolation as the
+    # console/assist windows). The moment it finishes it is disposed with the
+    # identical dispose-and-trim sequence — collectGarbage → clearComponentCache
+    # → deleteLater → EmptyWorkingSet — so every byte of the wizard's QML/JS
+    # object tree, component cache, and freed heap pages is returned to the OS.
+    # The idle app then carries ZERO onboarding footprint; nothing of it is ever
+    # re-created (the persisted onboarding_complete flag guarantees a single
+    # lifetime). The QML asset stays on disk for a possible "redo setup" later —
+    # deleting bundled files from a frozen install would break repair/upgrade
+    # for negligible disk savings, so we free RAM only, by design.
+    # ------------------------------------------------------------------
+    _onboarding_engine: QQmlApplicationEngine | None = None
+    _onboarding_window: QWindow | None = None
+
+    def _dispose_onboarding() -> None:
+        nonlocal _onboarding_engine, _onboarding_window
+        _onboarding_window = None
+        if _onboarding_engine is None:
+            return
+        doomed = _onboarding_engine
+        _onboarding_engine = None
+        try:
+            doomed.collectGarbage()
+        except Exception:
+            pass
+        try:
+            doomed.clearComponentCache()
+        except Exception:
+            pass
+        try:
+            doomed.deleteLater()
+        except Exception:
+            pass
+        QTimer.singleShot(0, lambda: QTimer.singleShot(0, _trim_working_set))
+
+    def _finish_onboarding() -> None:
+        """Persist completion, tear the wizard down, return to the idle tray app."""
+        settings_vm.complete_onboarding()
+        _dispose_onboarding()
+
+    def _open_onboarding() -> None:
+        nonlocal _onboarding_engine, _onboarding_window
+        if _onboarding_engine is not None:
+            return
+        _onboarding_engine = QQmlApplicationEngine()
+        # Reuse the SettingsViewModel for every operation (mic, model install,
+        # providers, hotkeys, live-test history) so onboarding adds NO backend
+        # object — only a transient view tree that is freed on finish.
+        _onboarding_engine.rootContext().setContextProperty(
+            "consoleViewModel", settings_vm
+        )
+        _onboarding_engine.load(QUrl.fromLocalFile(str(_ONBOARDING_QML)))
+        roots = _onboarding_engine.rootObjects()
+        if not roots:
+            _qml_err = f"[ERROR] Failed to load Onboarding QML from {_ONBOARDING_QML}\n"
+            print(_qml_err, file=sys.stderr)
+            _write_qml_error(_qml_err)
+            _onboarding_engine = None
+            # Don't trap the user on a broken wizard — mark it done so the app
+            # proceeds normally on this and every future launch.
+            settings_vm.complete_onboarding()
+            return
+        from typing import cast as _cast
+
+        _onboarding_window = _cast(QWindow, roots[0])
+        # The wizard emits finished() on "Done"; closing the window (X / Esc)
+        # also completes onboarding so it is never shown twice.
+        try:
+            _onboarding_window.finished.connect(_finish_onboarding)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        def _on_ob_visibility() -> None:
+            if _onboarding_window is not None and not _onboarding_window.isVisible():
+                _finish_onboarding()
+
+        _onboarding_window.visibleChanged.connect(_on_ob_visibility)
+        settings_vm.load()
+        _onboarding_window.show()
+        _onboarding_window.raise_()
+        _onboarding_window.requestActivate()
+
+    # ------------------------------------------------------------------
     # 8. System tray icon and context menu (Requirements 1.1, 1.2)
     # ------------------------------------------------------------------
     from PySide6.QtGui import QIcon
@@ -561,9 +652,20 @@ def main() -> None:
         )
 
     # ------------------------------------------------------------------
-    # 11. Open console on startup when the user has disabled "Launch Minimized"
+    # 11. First run → onboarding wizard; otherwise honour "Launch Minimized".
     # ------------------------------------------------------------------
-    if not settings.start_minimized:
+    # GRAIN_FORCE_ONBOARDING=1 re-triggers the wizard on demand (dev/testing)
+    # without wiping the install — completion still just sets the flag.
+    _force_onboarding = os.environ.get("GRAIN_FORCE_ONBOARDING") == "1"
+    _show_onboarding = _force_onboarding or (
+        (not _config_existed) and (not settings.onboarding_complete)
+    )
+    if _show_onboarding:
+        # True fresh install: greet the user with the one-time setup wizard.
+        # Deferred so tray + services are fully live (the wizard's live mic test
+        # needs the hotkey listener and the model install pipeline running).
+        QTimer.singleShot(400, _open_onboarding)
+    elif not settings.start_minimized:
         # Defer slightly so the tray icon is fully initialised before the
         # console window appears (avoids a brief flash of the window before
         # the tray icon is ready on slower machines).

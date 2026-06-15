@@ -445,7 +445,18 @@ Window {
 
         // Drop shadow the pill casts upward onto the riser. Only active while
         // the riser is visible; fades in/out with it via promptRiser.opacity.
-        layer.enabled: true
+        //
+        // The layer is an offscreen FBO that must be re-composited on EVERY dot
+        // animation frame while it exists. Since the shadow it carries is
+        // invisible unless the riser is on screen (shadowOpacity tracks
+        // promptRiser.opacity, which is 0 whenever the riser is hidden), keep
+        // the layer disabled in the common case — idle AND ordinary recording —
+        // so the permanent pill window holds no FBO and skips the per-frame
+        // composite. It is created only for the brief prompt-switch crescent and
+        // released again once the fade-out completes. Gating on opacity (not the
+        // boolean `shown`) keeps the layer alive through the 170 ms fade so the
+        // shadow fades out smoothly instead of snapping away.
+        layer.enabled: promptRiser.opacity > 0
         layer.effect: MultiEffect {
             autoPaddingEnabled: true
             shadowEnabled: true

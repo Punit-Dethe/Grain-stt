@@ -241,8 +241,14 @@ class AppSettings:
     # provider is not enabled for dictation processing.
     grain_assist_provider_id: str = ""
     # Console panel appearance — False = light (default), True = dark. Persisted
-    # so the user's light/dark choice survives restarts.
-    ui_dark_mode: bool = False
+    # so the user's light/dark choice survives restarts. The Quick Panel and the
+    # Advanced Panel each carry their OWN flag so the two can be mixed (e.g. a
+    # dark Quick Panel with a light Advanced Panel).
+    ui_dark_mode: bool = False           # Quick Panel theme
+    ui_dark_mode_advanced: bool = False  # Advanced Panel theme
+    # First-run onboarding — False until the one-time setup wizard is completed.
+    # Persisted so the wizard is summoned exactly once, then never again.
+    onboarding_complete: bool = False
     # UI history ring buffers — persisted so they survive restarts (max 10 each).
     transcription_history: list[dict] = field(default_factory=list)
     processing_history: list[dict] = field(default_factory=list)
@@ -403,6 +409,12 @@ PROVIDER_PRESETS: dict[str, ProviderPreset] = {
         name="Mistral",
         base_url="https://api.mistral.ai/v1",
         model="mistral-small-latest",
+        provider_type="llm",
+    ),
+    "nvidia_nim": ProviderPreset(
+        name="NVIDIA NIM",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="meta/llama-3.3-70b-instruct",
         provider_type="llm",
     ),
 }

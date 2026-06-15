@@ -113,6 +113,8 @@ class SettingsViewModel(QObject):
     grain_assist_provider_changed = Signal(str)
     llm_error_message_changed = Signal(str)
     ui_dark_mode_changed = Signal(bool)
+    ui_dark_mode_advanced_changed = Signal(bool)
+    onboarding_complete_changed = Signal(bool)
 
     # Local STT signals
     local_stt_status_changed = Signal(str)
@@ -172,6 +174,8 @@ class SettingsViewModel(QObject):
         self._llm_smart_rotation: bool = self._settings.llm_smart_rotation
         self._llm_error_message: str = ""
         self._ui_dark_mode: bool = self._settings.ui_dark_mode
+        self._ui_dark_mode_advanced: bool = self._settings.ui_dark_mode_advanced
+        self._onboarding_complete: bool = self._settings.onboarding_complete
 
         # Local STT manager. Injected by the backend (main.py) so the same
         # single instance is shared with AppController and its lifecycle is
@@ -229,6 +233,8 @@ class SettingsViewModel(QObject):
         self._set_stt_local_enabled(self._local_provider_enabled())
         self._set_llm_smart_rotation(self._settings.llm_smart_rotation)
         self._set_ui_dark_mode(self._settings.ui_dark_mode)
+        self._set_ui_dark_mode_advanced(self._settings.ui_dark_mode_advanced)
+        self._set_onboarding_complete(self._settings.onboarding_complete)
         self._transcription_history = list(self._settings.transcription_history)
         self._processing_history = list(self._settings.processing_history)
 
@@ -317,6 +323,12 @@ class SettingsViewModel(QObject):
             ),
             ui_dark_mode=overrides.get(
                 "ui_dark_mode", self._settings.ui_dark_mode
+            ),
+            ui_dark_mode_advanced=overrides.get(
+                "ui_dark_mode_advanced", self._settings.ui_dark_mode_advanced
+            ),
+            onboarding_complete=overrides.get(
+                "onboarding_complete", self._settings.onboarding_complete
             ),
             transcription_history=overrides.get(
                 "transcription_history", self._settings.transcription_history
@@ -1394,10 +1406,59 @@ class SettingsViewModel(QObject):
 
     @Slot(bool)
     def save_ui_dark_mode(self, enabled: bool) -> None:
-        """Persist the console light/dark preference so it survives restarts."""
+        """Persist the Quick Panel light/dark preference so it survives restarts."""
         self._settings = self._updated_settings(ui_dark_mode=bool(enabled))
         self._settings_store.save(self._settings)
         self._set_ui_dark_mode(bool(enabled))
+
+    # ------------------------------------------------------------------
+    # ui_dark_mode_advanced — Advanced Panel light/dark (independent flag)
+    # ------------------------------------------------------------------
+
+    @Property(bool, notify=ui_dark_mode_advanced_changed)
+    def ui_dark_mode_advanced(self) -> bool:
+        return self._ui_dark_mode_advanced
+
+    def _set_ui_dark_mode_advanced(self, value: bool) -> None:
+        if self._ui_dark_mode_advanced != value:
+            self._ui_dark_mode_advanced = value
+            self.ui_dark_mode_advanced_changed.emit(value)
+
+    @Slot(bool)
+    def save_ui_dark_mode_advanced(self, enabled: bool) -> None:
+        """Persist the Advanced Panel light/dark preference (separate from Quick)."""
+        self._settings = self._updated_settings(ui_dark_mode_advanced=bool(enabled))
+        self._settings_store.save(self._settings)
+        self._set_ui_dark_mode_advanced(bool(enabled))
+
+    # ------------------------------------------------------------------
+    # onboarding — first-run setup wizard state
+    # ------------------------------------------------------------------
+
+    @Property(bool, notify=onboarding_complete_changed)
+    def onboarding_complete(self) -> bool:
+        return self._onboarding_complete
+
+    def _set_onboarding_complete(self, value: bool) -> None:
+        if self._onboarding_complete != value:
+            self._onboarding_complete = value
+            self.onboarding_complete_changed.emit(value)
+
+    @Slot()
+    def complete_onboarding(self) -> None:
+        """Mark first-run setup done so the wizard is never summoned again."""
+        self._settings = self._updated_settings(onboarding_complete=True)
+        self._settings_store.save(self._settings)
+        self._set_onboarding_complete(True)
+
+    @Property(str, constant=True)
+    def recommended_model_id(self) -> str:
+        """The model the onboarding wizard nudges first-run users toward.
+
+        Parakeet TDT 0.6B v2 (INT8) — best English accuracy in its size class
+        at a ~1.2 GB RAM budget.
+        """
+        return "parakeet-tdt-0.6b-v2"
 
     # ------------------------------------------------------------------
     # llm_smart_rotation — provider routing config for LLM

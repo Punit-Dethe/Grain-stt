@@ -270,6 +270,8 @@ def _app_settings_from_dict(d: dict[str, Any]) -> AppSettings:
         llm_smart_rotation=bool(d.get("llm_smart_rotation", False)),
         grain_assist_provider_id=str(d.get("grain_assist_provider_id", "")),
         ui_dark_mode=bool(d.get("ui_dark_mode", False)),
+        ui_dark_mode_advanced=bool(d.get("ui_dark_mode_advanced", False)),
+        onboarding_complete=bool(d.get("onboarding_complete", False)),
         transcription_history=[
             e for e in d.get("transcription_history", [])
             if isinstance(e, dict) and "time" in e and "text" in e
