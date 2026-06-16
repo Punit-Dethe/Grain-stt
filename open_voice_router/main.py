@@ -16,10 +16,9 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
-import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QFontDatabase, QWindow
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
@@ -150,137 +149,6 @@ def _ensure_local_provider_registered(
     )
     settings_store.save(updated)
     return updated
-
-
-class _PillStallProbe(QObject):
-    """Diagnostic (env GRAIN_PILL_DIAG=1): pinpoint what stalls the GUI thread.
-
-    A QTimer asks to fire every 8 ms ON THE GUI THREAD. If it actually fires far
-    later, the GUI thread was blocked for that long — the same blockage that
-    freezes the pill. For each stall we also log the process page-fault delta and
-    working-set size, so we can tell the cause apart:
-
-      * gap spikes WITH a large page-fault delta  -> memory hard-faults (the
-        model-load allocation evicted our pages; the separate-process pill or a
-        bigger working-set floor is the fix).
-      * gap spikes with NO fault delta            -> pure CPU/scheduling or a
-        GPU/compositor stall (a different, cheaper fix).
-
-    Zero cost when the env flag is unset (never instantiated). Logs to stderr,
-    which the app already redirects into the server/app log.
-    """
-
-    def __init__(self, parent: QObject | None = None) -> None:
-        super().__init__(parent)
-        self._last = time.monotonic()
-        self._last_faults = self._page_faults()
-        self._timer = QTimer(self)
-        self._timer.setInterval(8)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start()
-        # Heartbeat updated by _tick on the GUI thread; a separate pure-Python
-        # watchdog thread reads it and, when the GUI thread goes silent, dumps
-        # the GUI thread's call stack — naming the exact blocking line. The
-        # watchdog can capture the stack as long as the blocking call released
-        # the GIL (true for I/O / device-open / lock waits, which is what an
-        # 828 ms stall with ~0 page faults looks like).
-        self._heartbeat = time.monotonic()
-        import threading
-
-        self._gui_thread_id = threading.main_thread().ident
-        self._watchdog = threading.Thread(
-            target=self._watchdog_loop, name="pill-stall-watchdog", daemon=True
-        )
-        self._watchdog.start()
-        print("[pill-diag] stall probe armed (8 ms tick + stack watchdog)",
-              file=sys.stderr, flush=True)
-
-    def _watchdog_loop(self) -> None:
-        import sys as _sys
-        import time as _time
-        import traceback as _tb
-
-        dumped = False
-        while True:
-            _time.sleep(0.03)
-            stalled_ms = (_time.monotonic() - self._heartbeat) * 1000.0
-            if stalled_ms > 150.0 and not dumped:
-                frames = _sys._current_frames()
-                frame = frames.get(self._gui_thread_id)
-                if frame is not None:
-                    stack = "".join(_tb.format_stack(frame))
-                    print(
-                        f"[pill-stall-stack] GUI thread blocked ~{stalled_ms:.0f}ms, "
-                        f"currently executing:\n{stack}",
-                        file=_sys.stderr,
-                        flush=True,
-                    )
-                dumped = True
-            elif stalled_ms < 50.0:
-                dumped = False
-
-    @staticmethod
-    def _mem_counters() -> tuple[int, int]:
-        """(PageFaultCount, WorkingSetSize) for this process, or (0, 0)."""
-        if sys.platform != "win32":
-            return (0, 0)
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            class _PMC(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                ]
-
-            # Set restype/argtypes explicitly: without them ctypes treats the
-            # process HANDLE as a 32-bit int and truncates it on 64-bit Windows,
-            # so the call fails and reports ws=0 (the bug in the first probe).
-            k32 = ctypes.windll.kernel32
-            psapi = ctypes.windll.psapi
-            k32.GetCurrentProcess.restype = ctypes.c_void_p
-            psapi.GetProcessMemoryInfo.argtypes = [
-                ctypes.c_void_p, ctypes.POINTER(_PMC), wintypes.DWORD
-            ]
-            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
-
-            pmc = _PMC()
-            pmc.cb = ctypes.sizeof(_PMC)
-            h = k32.GetCurrentProcess()
-            if psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
-                return (int(pmc.PageFaultCount), int(pmc.WorkingSetSize))
-        except Exception:
-            pass
-        return (0, 0)
-
-    def _page_faults(self) -> int:
-        return self._mem_counters()[0]
-
-    def _tick(self) -> None:
-        now = time.monotonic()
-        self._heartbeat = now  # tell the watchdog the GUI thread is alive
-        gap_ms = (now - self._last) * 1000.0
-        self._last = now
-        faults, ws = self._mem_counters()
-        d_faults = faults - self._last_faults
-        self._last_faults = faults
-        # The timer asks for 8 ms; anything past ~60 ms is a real GUI-thread stall.
-        if gap_ms > 60.0:
-            print(
-                f"[pill-stall] gui_blocked={gap_ms:.0f}ms  pagefaults+={d_faults}  "
-                f"ws={ws // (1024 * 1024)}MB",
-                file=sys.stderr,
-                flush=True,
-            )
 
 
 def main() -> None:
@@ -815,50 +683,30 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 13. Protect the main process's working set from OS trimming.
     #
-    # When the ASR sidecar allocates ~1.2 GB during model load, the Windows
-    # Memory Manager satisfies that demand by trimming OTHER processes' working
-    # sets — including ours. The pill animates via per-frame JavaScript on the
-    # Qt GUI thread (rollDots) reading QML-heap pages; if those pages have been
-    # pushed to standby and then repurposed for the model, the GUI thread
-    # HARD-FAULTS them back from disk and the pill freezes for the whole load.
+    # When the ASR server subprocess maps 640 MB of model weights, Windows
+    # Memory Manager may satisfy that demand by trimming OTHER processes'
+    # working sets — including ours — which causes the pill animation to
+    # freeze for 100-400 ms.  Setting a hard minimum working set size tells
+    # the OS it cannot trim us below that threshold, so our QML engine,
+    # FrameAnimation callbacks, and dot-state arrays stay resident in RAM.
     #
-    # The floor must therefore cover the LIVE UI hot set — Python runtime +
-    # Qt/QML engine + the permanent pill window + its FrameAnimation/dot-state
-    # JS heap — NOT a token amount. The previous 80 MB was far below a
-    # PySide6+QML app's real ~150-250 MB footprint, so everything above 80 MB
-    # (the pill's own pages included) stayed evictable: the app was paging out
-    # the very pill it needed resident. 320 MB keeps the whole pill UI pinned
-    # through the load storm. A hard minimum only PREVENTS trimming below this
-    # size; it does not pad usage, so an app that genuinely uses less is simply
-    # never trimmed. Tune via GRAIN_UI_WS_FLOOR_MB on very low-RAM targets.
-    # BELOW_NORMAL_PRIORITY_CLASS on the subprocess + reserving a CPU core for
-    # the engine (server.py) are the complementary CPU-side fixes.
+    # 80 MB covers the Python runtime + Qt/QML engine + pill window pages
+    # with margin. BELOW_NORMAL_PRIORITY_CLASS on the subprocess (set in
+    # LocalSTTManager._spawn_and_poll) is the complementary fix on that side.
     # ------------------------------------------------------------------
     if sys.platform == "win32":
         try:
             import ctypes
             _QUOTA_LIMITS_HARDWS_MIN_ENABLE = 0x00000001
             _QUOTA_LIMITS_HARDWS_MAX_DISABLE = 0x00000008
-            try:
-                _ws_floor_mb = int(os.environ.get("GRAIN_UI_WS_FLOOR_MB", "320"))
-            except (TypeError, ValueError):
-                _ws_floor_mb = 320
-            _ws_floor_mb = max(80, _ws_floor_mb)  # never below the old token floor
             ctypes.windll.kernel32.SetProcessWorkingSetSizeEx(
                 ctypes.windll.kernel32.GetCurrentProcess(),
-                _ws_floor_mb * 1024 * 1024,  # hard minimum: UI hot set stays resident
-                0,                            # maximum: not enforced
+                80 * 1024 * 1024,  # hard minimum: 80 MB always resident
+                0,                  # maximum: not enforced
                 _QUOTA_LIMITS_HARDWS_MIN_ENABLE | _QUOTA_LIMITS_HARDWS_MAX_DISABLE,
             )
         except Exception:
             pass
-
-    # Optional GUI-thread stall probe (env GRAIN_PILL_DIAG=1) — measures what
-    # actually freezes the pill during a cold model load. Kept alive for the
-    # app's lifetime by this reference; no-op overhead when the flag is unset.
-    _pill_probe = None
-    if os.environ.get("GRAIN_PILL_DIAG") == "1":
-        _pill_probe = _PillStallProbe()
 
     # ------------------------------------------------------------------
     # 14. Run the event loop

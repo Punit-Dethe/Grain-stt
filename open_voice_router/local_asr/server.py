@@ -143,22 +143,9 @@ CPU_OPTIMIZATION = {
     "available_logical_cpus": _get_available_logical_cpus(),
     "physical_cpus": _physical_cpu_count(),
 }
-# Reserve one core for the HOST app's UI thread. The Pill recording widget
-# animates via per-frame JavaScript (rollDots) on the main app's Qt GUI thread.
-# If this engine claims EVERY core — and ONNX Runtime's worker threads spin
-# (busy-wait) at 100% — the GUI thread has no core to run on during model load
-# and the Pill visibly freezes. Lowering the subprocess priority (done at spawn)
-# cannot help when every core is saturated, and moving the spawn off-thread
-# cannot help because the animation itself lives on the starved GUI thread.
-# Leaving one core free guarantees the host's GUI thread is always schedulable,
-# so the Pill keeps animating no matter how busy inference is. Costs at most one
-# thread of engine throughput — imperceptible for streaming dictation, where a
-# ~1.5 s chunk still transcribes far faster than real time. Override via
-# ASR_ENGINE_THREADS if a headless/batch deployment wants every core.
-_engine_thread_budget = min(
+default_engine_threads = min(
     CPU_OPTIMIZATION["physical_cpus"], CPU_OPTIMIZATION["available_logical_cpus"]
 )
-default_engine_threads = max(1, _engine_thread_budget - 1)
 ENGINE_CPU_THREADS = get_env_int("ASR_ENGINE_THREADS", default_engine_threads)
 default_waitress_threads = min(
     MAX_WAITRESS_THREADS,

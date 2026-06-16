@@ -12,9 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import os
-import sys
-import time
 import uuid
 from collections import deque
 from datetime import datetime, timedelta
@@ -39,20 +36,6 @@ from open_voice_router.services.volume_meter import VolumeMeterService
 from open_voice_router.storage.credential_store import CredentialStore
 from open_voice_router.storage.settings_store import SettingsStore
 from open_voice_router.ui.pill.pill_viewmodel import PillViewModel
-
-# Phase-timing diagnostic (env GRAIN_PILL_DIAG=1): measure how long each
-# blocking step of recording-start takes ON THE GUI THREAD, to find what
-# freezes the pill during a cold model load. No-op unless the flag is set.
-_PILL_DIAG = os.environ.get("GRAIN_PILL_DIAG") == "1"
-
-
-def _diag(label: str, t0: float) -> None:
-    if _PILL_DIAG:
-        print(
-            f"[pill-phase] {label}: {(time.monotonic() - t0) * 1000.0:.0f}ms",
-            file=sys.stderr,
-            flush=True,
-        )
 
 # Delay (ms) before the Pill UI is hidden after the DONE state is reached.
 _PILL_HIDE_DELAY_MS = 120
@@ -626,15 +609,11 @@ class AppController(QObject):
         self.pill_vm.is_visible = True  # type: ignore[assignment]
 
         # Start the isolated pill meter (its own mic stream — never touches the model).
-        _t = time.monotonic()
         self._volume_meter.start(self._settings.microphone_device_id)
-        _diag("volume_meter.start (GUI thread)", _t)
 
         if use_chunked:
             try:
-                _t = time.monotonic()
                 self._chunked_audio.start(self._settings.microphone_device_id)
-                _diag("chunked_audio.start (GUI thread)", _t)
             except AudioDeviceError as exc:
                 self._volume_meter.stop()
                 self._notify(
@@ -650,14 +629,10 @@ class AppController(QObject):
             self._load_failed = False
             self._load_latency_ms = None
             if self._local_stt_manager is not None:
-                _t = time.monotonic()
                 self._local_stt_manager.load(self._settings.local_stt_load_timeout_s)
-                _diag("local_stt_manager.load() return (GUI thread)", _t)
         else:
             try:
-                _t = time.monotonic()
                 self._audio_service.start(self._settings.microphone_device_id)
-                _diag("audio_service.start (GUI thread)", _t)
             except AudioDeviceError as exc:
                 self._volume_meter.stop()
                 self._notify(
