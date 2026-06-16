@@ -1038,13 +1038,19 @@ class LocalSTTManager(QObject):
             pids: set[int] = set()
             port_tag = f":{_SERVER_PORT}"
             for line in result.stdout.splitlines():
-                if port_tag in line and "LISTENING" in line:
-                    parts = line.split()
-                    if parts:
-                        try:
-                            pids.add(int(parts[-1]))
-                        except ValueError:
-                            pass
+                if "LISTENING" not in line:
+                    continue
+                parts = line.split()
+                # netstat -ano columns: Proto, Local Address, Foreign Address,
+                # State, PID. Match the LOCAL ADDRESS port exactly via endswith —
+                # a substring test on the whole line would also catch ephemeral
+                # ports like :50921 (which contains ":5092").
+                if len(parts) < 5 or not parts[1].endswith(port_tag):
+                    continue
+                try:
+                    pids.add(int(parts[-1]))
+                except ValueError:
+                    pass
             for pid in pids:
                 try:
                     subprocess.run(

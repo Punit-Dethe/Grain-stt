@@ -449,24 +449,37 @@ def transcribe_audio():
 
             chunk_durations = [chunk_boundaries[i + 1] - chunk_boundaries[i] for i in range(num_chunks)]
 
-            for i in range(num_chunks):
-                piece_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{unique_id}_chunk_{i}.wav")
-                temp_files_to_clean.append(piece_path)
-                chunk_command = [
-                    "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
-                    "-ss", str(chunk_boundaries[i]), "-t", str(chunk_durations[i]),
-                    "-i", target_wav_path, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", piece_path,
-                ]
-                subprocess.run(chunk_command, capture_output=True, text=True,
-                               creationflags=_NO_WINDOW)
-                piece_info = get_wav_info(piece_path)
-                piece_wave = (
-                    load_pcm_wav_as_16k_float(piece_path, piece_info)
-                    if piece_info is not None else None
+            if num_chunks == 1:
+                # No real split needed: target_wav_path is already 16 kHz mono
+                # PCM, so load it directly rather than spawning a redundant
+                # ffmpeg pass to re-extract the whole file as a single chunk.
+                single_info = get_wav_info(target_wav_path)
+                single_wave = (
+                    load_pcm_wav_as_16k_float(target_wav_path, single_info)
+                    if single_info is not None else None
                 )
-                if piece_wave is not None:
-                    waveforms.append(piece_wave)
-                    piece_durations.append(chunk_durations[i])
+                if single_wave is not None:
+                    waveforms.append(single_wave)
+                    piece_durations.append(chunk_durations[0])
+            else:
+                for i in range(num_chunks):
+                    piece_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{unique_id}_chunk_{i}.wav")
+                    temp_files_to_clean.append(piece_path)
+                    chunk_command = [
+                        "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+                        "-ss", str(chunk_boundaries[i]), "-t", str(chunk_durations[i]),
+                        "-i", target_wav_path, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", piece_path,
+                    ]
+                    subprocess.run(chunk_command, capture_output=True, text=True,
+                                   creationflags=_NO_WINDOW)
+                    piece_info = get_wav_info(piece_path)
+                    piece_wave = (
+                        load_pcm_wav_as_16k_float(piece_path, piece_info)
+                        if piece_info is not None else None
+                    )
+                    if piece_wave is not None:
+                        waveforms.append(piece_wave)
+                        piece_durations.append(chunk_durations[i])
 
         # ------------------------------------------------------------------
         # Transcribe each piece via the engine; offset times onto the upload's
