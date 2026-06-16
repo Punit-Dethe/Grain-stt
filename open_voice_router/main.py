@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QObject, QTimer, QUrl
 from PySide6.QtGui import QFontDatabase, QWindow
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
@@ -149,6 +149,86 @@ def _ensure_local_provider_registered(
     )
     settings_store.save(updated)
     return updated
+
+
+class _PillStallProbe(QObject):
+    """Diagnostic (env GRAIN_PILL_DIAG=1): pinpoint what stalls the GUI thread.
+
+    A QTimer asks to fire every 8 ms ON THE GUI THREAD. If it actually fires far
+    later, the GUI thread was blocked for that long — the same blockage that
+    freezes the pill. For each stall we also log the process page-fault delta and
+    working-set size, so we can tell the cause apart:
+
+      * gap spikes WITH a large page-fault delta  -> memory hard-faults (the
+        model-load allocation evicted our pages; the separate-process pill or a
+        bigger working-set floor is the fix).
+      * gap spikes with NO fault delta            -> pure CPU/scheduling or a
+        GPU/compositor stall (a different, cheaper fix).
+
+    Zero cost when the env flag is unset (never instantiated). Logs to stderr,
+    which the app already redirects into the server/app log.
+    """
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._last = time.monotonic()
+        self._last_faults = self._page_faults()
+        self._timer = QTimer(self)
+        self._timer.setInterval(8)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+        print("[pill-diag] stall probe armed (8 ms tick)", file=sys.stderr, flush=True)
+
+    @staticmethod
+    def _mem_counters() -> tuple[int, int]:
+        """(PageFaultCount, WorkingSetSize) for this process, or (0, 0)."""
+        if sys.platform != "win32":
+            return (0, 0)
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(_PMC)
+            h = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
+                return (int(pmc.PageFaultCount), int(pmc.WorkingSetSize))
+        except Exception:
+            pass
+        return (0, 0)
+
+    def _page_faults(self) -> int:
+        return self._mem_counters()[0]
+
+    def _tick(self) -> None:
+        now = time.monotonic()
+        gap_ms = (now - self._last) * 1000.0
+        self._last = now
+        faults, ws = self._mem_counters()
+        d_faults = faults - self._last_faults
+        self._last_faults = faults
+        # The timer asks for 8 ms; anything past ~60 ms is a real GUI-thread stall.
+        if gap_ms > 60.0:
+            print(
+                f"[pill-stall] gui_blocked={gap_ms:.0f}ms  pagefaults+={d_faults}  "
+                f"ws={ws // (1024 * 1024)}MB",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def main() -> None:
@@ -720,6 +800,13 @@ def main() -> None:
             )
         except Exception:
             pass
+
+    # Optional GUI-thread stall probe (env GRAIN_PILL_DIAG=1) — measures what
+    # actually freezes the pill during a cold model load. Kept alive for the
+    # app's lifetime by this reference; no-op overhead when the flag is unset.
+    _pill_probe = None
+    if os.environ.get("GRAIN_PILL_DIAG") == "1":
+        _pill_probe = _PillStallProbe()
 
     # ------------------------------------------------------------------
     # 14. Run the event loop
