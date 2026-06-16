@@ -348,9 +348,9 @@ Item {
                         }
                     }
 
-                    Item { width: 12 }
-
-                    // Slot badge (right-aligned)
+                    // Slot badge (right-aligned) — sits on the header's standard
+                    // 12 px RowLayout spacing, no extra spacer (which would
+                    // double-count the row spacing into a ~30 px gap).
                     Rectangle {
                         width: 96; height: 26; radius: 6
                         color: fill(0.05)

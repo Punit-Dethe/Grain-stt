@@ -296,8 +296,8 @@ ApplicationWindow {
                         Rectangle {
                             id: themeToggle
                             width: 90; height: 26; radius: 8
-                            // Light: dark beige track. Dark: slightly lighter than page bg.
-                            color: root.isDark ? "#272422" : "#B8B0A6"
+                            // Light: warm cream track. Dark: slightly lighter than page bg.
+                            color: root.isDark ? "#272422" : "#DDD5C8"
                             Behavior on color { ColorAnimation { duration: 380; easing.type: Easing.InOutCubic } }
                             border.width: 0
                             anchors.verticalCenter: parent.verticalCenter

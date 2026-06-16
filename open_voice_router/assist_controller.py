@@ -79,7 +79,10 @@ def build_user_message(instruction: str, selection: str) -> str:
     instruction = (instruction or "").strip()
     selection = (selection or "").strip()
     if len(selection) > MAX_SELECTION_CHARS:
-        selection = selection[:MAX_SELECTION_CHARS] + "\n[... selection truncated]"
+        # Keep the TAIL: the end of the selection is what the user most recently
+        # read, and instructions usually refer to that. (Previously this kept the
+        # head via selection[:MAX], contradicting the documented intent.)
+        selection = "[... selection truncated]\n" + selection[-MAX_SELECTION_CHARS:]
     if not selection:
         return instruction
     return f"<selected_text>\n{selection}\n</selected_text>\n\n{instruction}"
