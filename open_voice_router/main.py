@@ -178,7 +178,46 @@ class _PillStallProbe(QObject):
         self._timer.setInterval(8)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
-        print("[pill-diag] stall probe armed (8 ms tick)", file=sys.stderr, flush=True)
+        # Heartbeat updated by _tick on the GUI thread; a separate pure-Python
+        # watchdog thread reads it and, when the GUI thread goes silent, dumps
+        # the GUI thread's call stack — naming the exact blocking line. The
+        # watchdog can capture the stack as long as the blocking call released
+        # the GIL (true for I/O / device-open / lock waits, which is what an
+        # 828 ms stall with ~0 page faults looks like).
+        self._heartbeat = time.monotonic()
+        import threading
+
+        self._gui_thread_id = threading.main_thread().ident
+        self._watchdog = threading.Thread(
+            target=self._watchdog_loop, name="pill-stall-watchdog", daemon=True
+        )
+        self._watchdog.start()
+        print("[pill-diag] stall probe armed (8 ms tick + stack watchdog)",
+              file=sys.stderr, flush=True)
+
+    def _watchdog_loop(self) -> None:
+        import sys as _sys
+        import time as _time
+        import traceback as _tb
+
+        dumped = False
+        while True:
+            _time.sleep(0.03)
+            stalled_ms = (_time.monotonic() - self._heartbeat) * 1000.0
+            if stalled_ms > 150.0 and not dumped:
+                frames = _sys._current_frames()
+                frame = frames.get(self._gui_thread_id)
+                if frame is not None:
+                    stack = "".join(_tb.format_stack(frame))
+                    print(
+                        f"[pill-stall-stack] GUI thread blocked ~{stalled_ms:.0f}ms, "
+                        f"currently executing:\n{stack}",
+                        file=_sys.stderr,
+                        flush=True,
+                    )
+                dumped = True
+            elif stalled_ms < 50.0:
+                dumped = False
 
     @staticmethod
     def _mem_counters() -> tuple[int, int]:
@@ -228,6 +267,7 @@ class _PillStallProbe(QObject):
 
     def _tick(self) -> None:
         now = time.monotonic()
+        self._heartbeat = now  # tell the watchdog the GUI thread is alive
         gap_ms = (now - self._last) * 1000.0
         self._last = now
         faults, ws = self._mem_counters()
