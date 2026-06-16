@@ -14,7 +14,7 @@ Therefore this module must stay PURE STDLIB: no Qt, no numpy, no app imports.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Collection, Mapping
 
 # Engine identifiers — each maps to a wrapper module in local_asr/engines/.
 ENGINE_ONNX_ASR = "onnx_asr"
@@ -264,3 +264,46 @@ def get_model(model_id: str | None) -> ModelSpec:
 
 def is_known_model(model_id: str | None) -> bool:
     return bool(model_id) and model_id in _BY_ID
+
+
+def resolve_default_model_id(
+    persisted_id: str | None, cached_ids: Collection[str]
+) -> str:
+    """Resolve which model should actually be selected on this machine.
+
+    The persisted ``local_stt_model_id`` defaults to ``DEFAULT_MODEL_ID``
+    (Parakeet v3) for everyone — but that catalog default is meaningless if
+    Parakeet v3 isn't the model the user actually downloaded. This reconciles
+    the stored preference against what is genuinely installed (``cached_ids``)
+    so the app never boots "selected" on a model whose weights are absent while
+    a usable, installed model sits ignored.
+
+    Resolution order:
+      1. An explicit, *installed* selection wins — the user's choice is honored.
+      2. Otherwise prefer any installed model, in catalog (recommended) order,
+         so a machine with only Parakeet v2 (or Whisper, …) cached selects that
+         instead of the absent v3.
+      3. Nothing is installed — keep the persisted id if it's a known model
+         (so the install/download flow targets the user's intended model),
+         else the catalog default.
+
+    ``cached_ids`` is computed once by the caller (one models-dir walk) and
+    passed in, keeping this module pure-stdlib and free of filesystem work.
+    """
+    cached = set(cached_ids)
+
+    # 1. Honor an explicit selection that is actually installed.
+    if persisted_id and persisted_id in _BY_ID and persisted_id in cached:
+        return persisted_id
+
+    # 2. The selection isn't installed — fall back to the best installed model,
+    #    preferring catalog order (recommended first).
+    for spec in _MODELS:
+        if spec.id in cached:
+            return spec.id
+
+    # 3. Nothing installed at all — preserve the intended model for the
+    #    install flow, else the catalog default.
+    if persisted_id and persisted_id in _BY_ID:
+        return persisted_id
+    return DEFAULT_MODEL_ID

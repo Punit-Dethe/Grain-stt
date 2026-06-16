@@ -221,6 +221,26 @@ def main() -> None:
     # the UI closed). Shared by the settings UI and the session controller so
     # both drive the same process (single-process invariant — R8.5).
     # ------------------------------------------------------------------
+    # Reconcile the persisted model selection against what is actually
+    # installed on this machine. The stored default (Parakeet v3) is the same
+    # for everyone, so without this a user who downloaded a different model
+    # would boot "selected" on the absent v3 — failing every transcription —
+    # while their installed model sat unused. Resolve to an installed model and
+    # persist it so the runtime and the settings UI agree.
+    from open_voice_router.local_asr import registry as _model_registry
+
+    _effective_model_id = _model_registry.resolve_default_model_id(
+        settings.local_stt_model_id, LocalSTTManager.cached_model_ids()
+    )
+    if _effective_model_id != settings.local_stt_model_id:
+        settings = dataclasses.replace(
+            settings, local_stt_model_id=_effective_model_id
+        )
+        try:
+            settings_store.save(settings)
+        except Exception:
+            pass  # non-fatal — runtime still uses the resolved id below
+
     local_stt_manager = LocalSTTManager(model_id=settings.local_stt_model_id)
 
     # Register the local provider at startup if installed, so the hotkey works

@@ -60,6 +60,64 @@ def test_unknown_model_falls_back_to_default():
 
 
 # ---------------------------------------------------------------------------
+# Effective-default resolution (honors what is actually installed)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_prefers_installed_over_absent_catalog_default():
+    """The stored default (Parakeet v3) must not win when it isn't installed
+    and another model is — the whole point of the bug fix."""
+    installed = registry.get_model("parakeet-tdt-0.6b-v2").id
+    result = registry.resolve_default_model_id(
+        registry.DEFAULT_MODEL_ID, cached_ids={installed}
+    )
+    assert result == installed
+
+
+def test_resolve_honors_explicit_installed_selection():
+    """An explicit selection that IS installed is always kept, even when other
+    models are also installed."""
+    chosen = "whisper-base-ct2"
+    result = registry.resolve_default_model_id(
+        chosen, cached_ids={chosen, registry.DEFAULT_MODEL_ID}
+    )
+    assert result == chosen
+
+
+def test_resolve_picks_catalog_order_among_installed():
+    """With several installed and no valid selection, the earliest catalog
+    (recommended) entry wins."""
+    all_ids = {m.id for m in registry.all_models()}
+    result = registry.resolve_default_model_id(None, cached_ids=all_ids)
+    assert result == registry.all_models()[0].id
+
+
+def test_resolve_keeps_known_persisted_when_nothing_installed():
+    """Nothing cached → keep the intended model so the install flow targets it."""
+    assert (
+        registry.resolve_default_model_id("whisper-base-ct2", cached_ids=set())
+        == "whisper-base-ct2"
+    )
+
+
+def test_resolve_falls_back_to_default_when_nothing_known_or_installed():
+    assert (
+        registry.resolve_default_model_id("no-such-model", cached_ids=set())
+        == registry.DEFAULT_MODEL_ID
+    )
+    assert (
+        registry.resolve_default_model_id(None, cached_ids=set())
+        == registry.DEFAULT_MODEL_ID
+    )
+
+
+def test_resolve_ignores_unknown_cached_id():
+    """A cached id not in the registry is never selected."""
+    result = registry.resolve_default_model_id(None, cached_ids={"garbage-model"})
+    assert result == registry.DEFAULT_MODEL_ID
+
+
+# ---------------------------------------------------------------------------
 # Engine factory — every registry entry must construct (no heavy imports)
 # ---------------------------------------------------------------------------
 

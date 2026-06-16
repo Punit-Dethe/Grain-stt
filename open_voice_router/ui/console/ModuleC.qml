@@ -198,17 +198,11 @@ Rectangle {
                         anchors { fill: parent; margins: 10 }
                         spacing: 6
 
-                        // Header + input row
+                        // Input row: text field + square add button
                         RowLayout {
-                            Layout.fillWidth: true; spacing: 14
+                            Layout.fillWidth: true; spacing: 8
 
-                            ColumnLayout {
-                                spacing: 1
-                                Text { text: "Add to dictionary"; font.pixelSize: 11; font.bold: true; color: theme.ink(0.9) }
-                                Text { text: "Press enter to add"; font.family: "JetBrains Mono"; font.pixelSize: 8; color: theme.ink(0.45) }
-                            }
-
-                            // Input field — fills remaining width after the label column
+                            // Input field — fills remaining width before the add button
                             Rectangle {
                                 Layout.fillWidth: true; height: 28; radius: 5
                                 color: theme.fill(0.05)
@@ -223,18 +217,41 @@ Rectangle {
                                     font.family: "JetBrains Mono"; font.pixelSize: 9; font.bold: true
                                     color: theme.inputText; clip: true
 
-                                    Text {
-                                        anchors { left: parent.left; verticalCenter: parent.verticalCenter }
-                                        text: "type word…"; font.family: "JetBrains Mono"; font.pixelSize: 9
-                                        color: theme.ink(0.35)
-                                        visible: parent.text.length === 0 && !parent.activeFocus
-                                    }
-
-                                    Keys.onReturnPressed: {
+                                    function commit() {
                                         var w = text.trim()
                                         var vm = (typeof consoleViewModel !== "undefined" && consoleViewModel) ? consoleViewModel : null
                                         if (w.length > 0 && vm) { vm.add_word(w); text = "" }
                                     }
+
+                                    Text {
+                                        anchors { left: parent.left; verticalCenter: parent.verticalCenter }
+                                        text: "Add to dictionary"; font.family: "JetBrains Mono"; font.pixelSize: 9
+                                        color: theme.ink(0.35)
+                                        visible: parent.text.length === 0
+                                    }
+
+                                    Keys.onReturnPressed: wordInput.commit()
+                                }
+                            }
+
+                            // Square add button
+                            Rectangle {
+                                width: 28; height: 28; radius: 5
+                                color: _addH.hovered === true ? "#FF5D1E" : theme.fill(0.05)
+                                border.color: _addH.hovered === true ? "#FF5D1E" : theme.fill(0.14)
+                                border.width: 1
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                                Behavior on border.color { ColorAnimation { duration: 120 } }
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "+"; font.pixelSize: 16; font.bold: true
+                                    color: _addH.hovered === true ? "#ffffff" : theme.ink(0.6)
+                                }
+                                HoverHandler { id: _addH }
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                    onClicked: wordInput.commit()
                                 }
                             }
                         }
@@ -257,10 +274,10 @@ Rectangle {
 
                             Flickable {
                                 id: chipFlickable
-                                width: parent.width; height: 22
+                                width: parent.width; height: 28
                                 anchors.verticalCenter: parent.verticalCenter
                                 contentWidth: chipInnerRow.implicitWidth
-                                contentHeight: 22
+                                contentHeight: 28
                                 flickableDirection: Flickable.HorizontalFlick
                                 boundsBehavior: Flickable.StopAtBounds
                                 clip: true
@@ -296,7 +313,7 @@ Rectangle {
                                         }
 
                                         Rectangle {
-                                            height: 22; width: _wLabel.implicitWidth + 16; radius: 5
+                                            height: 28; width: _wLabel.implicitWidth + 18; radius: 5
                                             color: _chipH.hovered === true ? theme.fill(0.08) : theme.fill(0.05)
                                             border.color: theme.fill(0.08); border.width: 1
                                             Behavior on color { ColorAnimation { duration: 100 } }
