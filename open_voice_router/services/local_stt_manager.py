@@ -383,31 +383,43 @@ class LocalSTTManager(QObject):
     def _start_file_cache_warmer(self) -> None:
         """Prime the OS page cache for the large model blob files.
 
-        Uses mmap instead of file.read() so the 640 MB file data moves through
-        the OS virtual-memory system rather than the Python heap.  The mapped
-        pages land in the shared OS page cache (available to the server subprocess
-        when it later loads the model) but the main process's heap does not grow —
-        fixing the ~8 MB RSS increase that the read()-based approach caused.
+        Reads each blob sequentially in 8 MB blocks via readinto() on a daemon
+        thread. file.readinto() RELEASES the GIL during the read syscall, which
+        is essential: the main thread runs QML that reads Python properties (the
+        pill's per-frame amplitude_level), so it must take the GIL — any warmer
+        that holds the GIL for seconds freezes the pill. (The earlier mmap
+        per-page touch loop did exactly that and was the cold-load freeze.) The
+        read pages land in the shared OS cache for the server subprocess; only a
+        single reused 8 MB buffer touches our heap, trimmed away below.
         """
         def _warm() -> None:
+            # Reusable 8 MB buffer: readinto() reuses it, so warming the cache
+            # adds no per-iteration heap allocation (constant 8 MB transient).
+            buf = bytearray(8 * 1024 * 1024)
             try:
-                import mmap as _mmap
                 if not _MODELS_DIR.exists():
                     return
                 for blob in _MODELS_DIR.rglob("*"):
                     if not blob.is_file():
                         continue
                     try:
-                        size = blob.stat().st_size
-                        if size < 1024 * 1024:
+                        if blob.stat().st_size < 1024 * 1024:
                             continue  # skip tiny metadata files
+                        # Sequential block reads pull the file into the OS page
+                        # cache (warming it for the server subprocess) while
+                        # RELEASING the GIL during each read syscall.
+                        #
+                        # The previous mmap per-page loop (`mm[offset]` for every
+                        # 4 KB page) HELD the GIL across hundreds of thousands of
+                        # disk-faulting accesses. Because the pill's QML reads a
+                        # Python property (amplitude_level) every frame and so must
+                        # take the GIL, that loop froze the pill for the entire
+                        # multi-second warm — the long-standing cold-load freeze.
+                        # readinto() yields the GIL on every read, so the GUI
+                        # thread stays live and the pill animates throughout.
                         with open(blob, "rb") as fh:
-                            with _mmap.mmap(fh.fileno(), 0, access=_mmap.ACCESS_READ) as mm:
-                                # Touch one byte per 4 KB page — enough to fault
-                                # each page into the OS cache.  mm[offset] returns
-                                # a cached small int; no heap allocation occurs.
-                                for offset in range(0, size, 4096):
-                                    mm[offset]
+                            while fh.readinto(buf):
+                                pass
                     except OSError:
                         pass
             except Exception:
