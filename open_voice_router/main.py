@@ -683,26 +683,39 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 13. Protect the main process's working set from OS trimming.
     #
-    # When the ASR server subprocess maps 640 MB of model weights, Windows
-    # Memory Manager may satisfy that demand by trimming OTHER processes'
-    # working sets — including ours — which causes the pill animation to
-    # freeze for 100-400 ms.  Setting a hard minimum working set size tells
-    # the OS it cannot trim us below that threshold, so our QML engine,
-    # FrameAnimation callbacks, and dot-state arrays stay resident in RAM.
+    # When the ASR sidecar allocates ~1.2 GB during model load, the Windows
+    # Memory Manager satisfies that demand by trimming OTHER processes' working
+    # sets — including ours. The pill animates via per-frame JavaScript on the
+    # Qt GUI thread (rollDots) reading QML-heap pages; if those pages have been
+    # pushed to standby and then repurposed for the model, the GUI thread
+    # HARD-FAULTS them back from disk and the pill freezes for the whole load.
     #
-    # 80 MB covers the Python runtime + Qt/QML engine + pill window pages
-    # with margin. BELOW_NORMAL_PRIORITY_CLASS on the subprocess (set in
-    # LocalSTTManager._spawn_and_poll) is the complementary fix on that side.
+    # The floor must therefore cover the LIVE UI hot set — Python runtime +
+    # Qt/QML engine + the permanent pill window + its FrameAnimation/dot-state
+    # JS heap — NOT a token amount. The previous 80 MB was far below a
+    # PySide6+QML app's real ~150-250 MB footprint, so everything above 80 MB
+    # (the pill's own pages included) stayed evictable: the app was paging out
+    # the very pill it needed resident. 320 MB keeps the whole pill UI pinned
+    # through the load storm. A hard minimum only PREVENTS trimming below this
+    # size; it does not pad usage, so an app that genuinely uses less is simply
+    # never trimmed. Tune via GRAIN_UI_WS_FLOOR_MB on very low-RAM targets.
+    # BELOW_NORMAL_PRIORITY_CLASS on the subprocess + reserving a CPU core for
+    # the engine (server.py) are the complementary CPU-side fixes.
     # ------------------------------------------------------------------
     if sys.platform == "win32":
         try:
             import ctypes
             _QUOTA_LIMITS_HARDWS_MIN_ENABLE = 0x00000001
             _QUOTA_LIMITS_HARDWS_MAX_DISABLE = 0x00000008
+            try:
+                _ws_floor_mb = int(os.environ.get("GRAIN_UI_WS_FLOOR_MB", "320"))
+            except (TypeError, ValueError):
+                _ws_floor_mb = 320
+            _ws_floor_mb = max(80, _ws_floor_mb)  # never below the old token floor
             ctypes.windll.kernel32.SetProcessWorkingSetSizeEx(
                 ctypes.windll.kernel32.GetCurrentProcess(),
-                80 * 1024 * 1024,  # hard minimum: 80 MB always resident
-                0,                  # maximum: not enforced
+                _ws_floor_mb * 1024 * 1024,  # hard minimum: UI hot set stays resident
+                0,                            # maximum: not enforced
                 _QUOTA_LIMITS_HARDWS_MIN_ENABLE | _QUOTA_LIMITS_HARDWS_MAX_DISABLE,
             )
         except Exception:
