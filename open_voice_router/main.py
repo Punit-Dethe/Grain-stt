@@ -203,10 +203,21 @@ class _PillStallProbe(QObject):
                     ("PeakPagefileUsage", ctypes.c_size_t),
                 ]
 
+            # Set restype/argtypes explicitly: without them ctypes treats the
+            # process HANDLE as a 32-bit int and truncates it on 64-bit Windows,
+            # so the call fails and reports ws=0 (the bug in the first probe).
+            k32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            psapi.GetProcessMemoryInfo.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_PMC), wintypes.DWORD
+            ]
+            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+
             pmc = _PMC()
             pmc.cb = ctypes.sizeof(_PMC)
-            h = ctypes.windll.kernel32.GetCurrentProcess()
-            if ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
+            h = k32.GetCurrentProcess()
+            if psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
                 return (int(pmc.PageFaultCount), int(pmc.WorkingSetSize))
         except Exception:
             pass
