@@ -1,12 +1,12 @@
 // DotMatrixDisplay.qml — Static "GRAIN//" LED dot-matrix logo
 //
-// Renders the GRAIN// wordmark as a dense field of soft LED dots. The word is
-// rasterised from a real heavy font onto a fine dot grid: every dot inside a
-// glyph lights warm-amber, the rest stay faint, and the field vignettes toward
-// the panel edges. Each dot is drawn with a radial gradient so its edges fade
-// softly (the LED look), and the whole wordmark is centred by measuring the
-// rasterised glyph's actual bounding box rather than trusting font metrics.
-// The slashes use the same typeface so "//" matches the GRAIN look. No animation.
+// A still LED-sign rendering of the GRAIN// wordmark. The word is rasterised
+// from a real bold font onto a regular dot grid; every dot that falls inside a
+// glyph lights warm-amber, the rest stay faint. Each dot is a distinct circle
+// with a feathered edge and a clear gap to its neighbours — like a real LED
+// matrix — so strokes never blob together. The wordmark is centred by measuring
+// the rasterised glyph's actual bounding box. The slashes use the same typeface
+// so "//" matches the GRAIN look. No animation.
 import QtQuick 2.15
 
 Item {
@@ -15,9 +15,7 @@ Item {
     property color dotColor: "#FF8A1E"   // warm LED amber
 
     // Dot pitch tied to height for consistent density across widths.
-    // ~42 dot-rows tall — dense enough to render the slashes cleanly.
-    readonly property real _step: Math.max(2.6, height / 42)
-    readonly property real _dotR: _step * 0.5
+    readonly property real _step: Math.max(2.8, height / 40)
 
     onWidthChanged:  canvas.requestPaint()
     onHeightChanged: canvas.requestPaint()
@@ -35,16 +33,18 @@ Item {
             if (W <= 0 || H <= 0) return
             var dc = root.dotColor
 
-            // ── 1. Rasterise the wordmark with a heavy font ─────────────
+            // ── 1. Rasterise the wordmark with a *bold* (not black) font ─
+            // Bold (700) keeps the strokes ~3 dots thick, like the reference;
+            // a heavier weight thickens the letters into mush.
             ctx.clearRect(0, 0, W, H)
             var text = "GRAIN//"
-            var fontPx = H * 0.72
-            ctx.font = "800 " + fontPx + "px 'Arial Black', 'Arial', sans-serif"
+            var fontPx = H * 0.70
+            ctx.font = "700 " + fontPx + "px 'Arial', 'Helvetica', sans-serif"
             var tw = ctx.measureText(text).width
             var maxW = W * 0.90
             if (tw > maxW) {
                 fontPx = fontPx * maxW / tw
-                ctx.font = "800 " + fontPx + "px 'Arial Black', 'Arial', sans-serif"
+                ctx.font = "700 " + fontPx + "px 'Arial', 'Helvetica', sans-serif"
             }
             ctx.textAlign = "center"
             ctx.textBaseline = "middle"
@@ -61,7 +61,7 @@ Item {
             for (var y = 0; y < IH; y++) {
                 var rowBase = y * IW
                 for (var x = 0; x < IW; x++) {
-                    if (data[(rowBase + x) * 4 + 3] > 40) {
+                    if (data[(rowBase + x) * 4 + 3] > 50) {
                         if (x < minX) minX = x
                         if (x > maxX) maxX = x
                         if (y < minY) minY = y
@@ -81,33 +81,36 @@ Item {
                 return data[(yi * IW + xi) * 4 + 3] / 255
             }
 
-            // ── 3. Dot grid geometry (centred, symmetric margins) ───────
-            var step = root._step, rr = root._dotR
+            // ── 3. Regular dot grid (centred, symmetric margins) ────────
+            var step = root._step
             var cols = Math.max(1, Math.floor(W / step))
             var rows = Math.max(1, Math.floor(H / step))
             var gx = (W - cols * step) / 2 + step / 2
             var gy = (H - rows * step) / 2 + step / 2
 
             // Panel-edge vignette — the dot field melts into the dark border.
-            var mx = W * 0.13, my = H * 0.15
+            var mx = W * 0.12, my = H * 0.14
             function edgeFade(px, py) {
                 var fx = Math.min(px, W - px) / mx
                 var fy = Math.min(py, H - py) / my
                 return Math.max(0, Math.min(1, Math.min(fx, fy)))
             }
 
-            // A soft dot: bright core fading to transparent at the rim, so the
-            // edge of every dot is feathered rather than a hard circle.
+            // A soft dot: bright core feathering to transparent at its rim.
+            // radius stays < half the pitch so neighbouring dots never touch.
             function softDot(cx, cy, radius, alpha) {
                 var grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius)
                 grad.addColorStop(0.0, Qt.rgba(dc.r, dc.g, dc.b, alpha))
-                grad.addColorStop(0.55, Qt.rgba(dc.r, dc.g, dc.b, alpha * 0.8))
+                grad.addColorStop(0.6, Qt.rgba(dc.r, dc.g, dc.b, alpha * 0.78))
                 grad.addColorStop(1.0, Qt.rgba(dc.r, dc.g, dc.b, 0.0))
                 ctx.fillStyle = grad
                 ctx.beginPath()
                 ctx.arc(cx, cy, radius, 0, Math.PI * 2)
                 ctx.fill()
             }
+
+            var litR = step * 0.46   // distinct dots: just under half the pitch
+            var bgR  = step * 0.42
 
             // Pass A: faint unlit field; collect lit dots for the bright pass.
             var litX = [], litY = [], litB = []
@@ -117,23 +120,25 @@ Item {
                     var py = gy + r * step
                     var fade = edgeFade(px, py)
                     var cov = coverAt(px, py)
-                    if (cov > 0.4) {
+                    if (cov > 0.5) {
                         litX.push(px); litY.push(py)
-                        litB.push(Math.max(0.8, Math.min(1.0, cov)) * Math.max(0.45, fade))
+                        litB.push(Math.max(0.85, Math.min(1.0, cov)) * Math.max(0.5, fade))
                     } else if (fade > 0.002) {
-                        softDot(px, py, rr * 1.1, 0.08 * fade)
+                        softDot(px, py, bgR, 0.07 * fade)
                     }
                 }
             }
 
-            // Pass B: lit wordmark dots — a touch larger so the soft rims meet
-            // and the strokes read as solid, with a gentle outer glow.
-            ctx.shadowColor = Qt.rgba(dc.r, dc.g, dc.b, 0.7)
-            ctx.shadowBlur  = step * 0.7
-            for (var i = 0; i < litX.length; i++) {
-                softDot(litX[i], litY[i], rr * 1.35, litB[i])
+            // Pass B: a faint bloom halo under the lit dots so the word glows
+            // as a whole — low alpha and wide, so it never blobs the dots.
+            for (var b = 0; b < litX.length; b++) {
+                softDot(litX[b], litY[b], step * 1.15, 0.10 * litB[b])
             }
-            ctx.shadowBlur = 0
+
+            // Pass C: lit wordmark dots — distinct, each with its own soft rim.
+            for (var i = 0; i < litX.length; i++) {
+                softDot(litX[i], litY[i], litR, litB[i])
+            }
         }
     }
 }
