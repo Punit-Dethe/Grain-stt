@@ -84,18 +84,28 @@ class AudioConditioner:
         ``block`` is shaped (n, 1) as delivered by sounddevice. Returns a new
         array — the input is never mutated.
         """
-        x = block.astype(np.float32).reshape(-1) / 32768.0
-        y = np.empty_like(x)
+        # A biquad's feedback (each output depends on prior outputs) can't be
+        # vectorised, so this stays a per-sample loop. But iterating a Python
+        # list is ~5-10x faster than indexing the ndarray element-by-element
+        # (which boxes a numpy scalar per access) — and this runs on the audio
+        # callback thread, so the saved time is glitch headroom. The math is
+        # bit-identical: .tolist() widens float32->float exactly like float(x[i]),
+        # and only the output array is rounded back to float32 (the feedback
+        # path uses the full-precision yi in both forms).
+        x = (block.astype(np.float32).reshape(-1) / 32768.0).tolist()
         b0, b1, b2, a1, a2 = self._b0, self._b1, self._b2, self._a1, self._a2
         z1, z2 = self._z1, self._z2
-        for i in range(x.shape[0]):
-            xi = float(x[i])
+        y: list[float] = []
+        append = y.append
+        for xi in x:
             yi = b0 * xi + z1
             z1 = b1 * xi - a1 * yi + z2
             z2 = b2 * xi - a2 * yi
-            y[i] = yi
+            append(yi)
         self._z1, self._z2 = z1, z2
-        out = np.clip(y * 32768.0, -32768.0, 32767.0).astype(np.int16)
+        out = np.clip(
+            np.asarray(y, dtype=np.float32) * 32768.0, -32768.0, 32767.0
+        ).astype(np.int16)
         return out.reshape(block.shape)
 
 
