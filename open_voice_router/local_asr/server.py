@@ -208,9 +208,10 @@ def get_wav_info(file_path):
 
 
 def load_pcm_wav_as_16k_float(file_path, wav_info):
-    # audioop is deprecated in Python 3.13; import lazily to keep it off the
-    # startup path and to isolate the deprecation warning to this function.
-    import audioop  # noqa: PLC0415
+    # Decode/downmix/resample with numpy only. The stdlib ``audioop`` module
+    # was removed in Python 3.13, and a lazy ``import audioop`` is invisible to
+    # PyInstaller's static analysis, so the C extension never gets bundled into
+    # the frozen EXE — both reasons to avoid it entirely here.
     if wav_info["compression"] != "NONE":
         return None
     sample_width = wav_info["sample_width"]
@@ -220,18 +221,38 @@ def load_pcm_wav_as_16k_float(file_path, wav_info):
     try:
         with wave.open(file_path, "rb") as wf:
             pcm = wf.readframes(wf.getnframes())
-        if channels == 2:
-            pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
-        if wav_info["sample_rate"] != 16000:
-            pcm, _ = audioop.ratecv(pcm, sample_width, 1, wav_info["sample_rate"], 16000, None)
+        # Decode interleaved PCM to float32 in [-1, 1].
         if sample_width == 1:
-            return (np.frombuffer(pcm, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
-        if sample_width == 2:
-            return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
-        if sample_width == 4:
-            return np.frombuffer(pcm, dtype="<i4").astype(np.float32) / 2147483648.0
-        pcm_16 = audioop.lin2lin(pcm, sample_width, 2)
-        return np.frombuffer(pcm_16, dtype="<i2").astype(np.float32) / 32768.0
+            samples = (np.frombuffer(pcm, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+        elif sample_width == 2:
+            samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+        elif sample_width == 3:
+            # 24-bit little-endian signed PCM: 3 bytes per sample.
+            raw = np.frombuffer(pcm, dtype=np.uint8)
+            raw = raw[: raw.size - (raw.size % 3)].reshape(-1, 3).astype(np.int32)
+            ints = raw[:, 0] | (raw[:, 1] << 8) | (raw[:, 2] << 16)
+            ints = np.where(ints >= 0x800000, ints - 0x1000000, ints)
+            samples = ints.astype(np.float32) / 8388608.0
+        else:  # sample_width == 4
+            samples = np.frombuffer(pcm, dtype="<i4").astype(np.float32) / 2147483648.0
+
+        if samples.size == 0:
+            return None
+
+        # Downmix stereo to mono by averaging channels.
+        if channels == 2:
+            samples = samples[: samples.size - (samples.size % 2)].reshape(-1, 2).mean(axis=1)
+
+        # Resample to 16 kHz via linear interpolation.
+        src_rate = wav_info["sample_rate"]
+        if src_rate and src_rate != 16000 and samples.size > 1:
+            dst_count = int(round(samples.size * 16000 / float(src_rate)))
+            if dst_count <= 0:
+                return None
+            src_idx = np.linspace(0.0, samples.size - 1, dst_count)
+            samples = np.interp(src_idx, np.arange(samples.size), samples)
+
+        return samples.astype(np.float32)
     except Exception:
         return None
 

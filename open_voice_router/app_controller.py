@@ -768,8 +768,38 @@ class AppController(QObject):
 
         # Persist so the choice survives and the settings UI reflects it on its
         # next open. Best-effort: a disk error must never break the recording.
+        #
+        # IMPORTANT: read-modify-write, never a blind whole-blob save. The
+        # settings file has two in-memory owners — this controller (a snapshot
+        # frozen at startup) and the SettingsViewModel (re-loaded each time its
+        # window opens). Saving our stale snapshot wholesale would clobber any
+        # setting the user changed in the UI during this same session (the
+        # "settings don't persist across launches" bug). So we re-load the
+        # current on-disk settings and flip ONLY the active prompt, matched by
+        # stable id, leaving every other field exactly as the UI last wrote it.
         try:
-            self._settings_store.save(self._settings)
+            on_disk = self._settings_store.load()
+            if any(p.id == active.id for p in on_disk.prompts):
+                merged_prompts = [
+                    dataclasses.replace(p, is_active=(p.id == active.id))
+                    for p in on_disk.prompts
+                ]
+                chosen = next(p for p in merged_prompts if p.id == active.id)
+                merged = dataclasses.replace(
+                    on_disk,
+                    prompts=merged_prompts,
+                    global_system_prompt=chosen.text,
+                )
+            else:
+                # The chosen prompt no longer exists on disk (deleted in the UI
+                # this session); fall back to persisting our view of the list.
+                merged = dataclasses.replace(
+                    on_disk, prompts=new_prompts, global_system_prompt=active.text
+                )
+            self._settings_store.save(merged)
+            # Converge our snapshot to disk truth so the rest of this session
+            # also reflects any concurrent UI edits.
+            self._settings = merged
         except Exception:  # noqa: BLE001
             pass
 
